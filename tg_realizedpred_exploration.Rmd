@@ -19,7 +19,7 @@ source(here("download_target.R"))
 Ripping this code from Freya Olsson's tutorial: https://github.com/OlssonF/NEON-forecast-challenge-workshop/blob/main/Analyse_scores/Get_scores_tutorial.Rmd
 
 ```{r}
-s3 <- arrow::s3_bucket(bucket = "neon4cast-scores/parquet/aquatics", endpoint_override= "data.ecoforecast.org")
+s3_aquatic <- arrow::s3_bucket(bucket = "neon4cast-scores/parquet/aquatics", endpoint_override= "data.ecoforecast.org")
 s3_pheno <- arrow::s3_bucket(bucket = "neon4cast-scores/parquet/phenology", endpoint_override= "data.ecoforecast.org")
 s3_terr <- arrow::s3_bucket(bucket = "neon4cast-scores/parquet/terrestrial_daily", endpoint_override= "data.ecoforecast.org")
 s3_beetle <- arrow::s3_bucket(bucket = "neon4cast-scores/parquet/beetles", endpoint_override= "data.ecoforecast.org")
@@ -33,12 +33,13 @@ get_sites <- readr::read_csv("https://raw.githubusercontent.com/eco4cast/neon4ca
   select(field_site_id) |> #slice_head(n = 5)|>
   pull() # get in a vector
 
-#get_variables <- c('temperature', 'oxygen', "gcc90", "nee", "beetles")
+get_variables <- c('temperature', 'oxygen', "gcc90", "nee", "abundance")
 
-aq_scores <- open_dataset(s3) |>
+aq_scores <- open_dataset(s3_aquatic) |>
   filter(reference_datetime %in% get_refdates,
          model_id == "tg_randfor",
-         site_id %in% get_sites) |> 
+         site_id %in% get_sites,
+         variable %in% get_variables) |> 
   collect() |> 
   mutate(horizon = as.numeric(as_date(datetime) - as_date(reference_datetime)))
 
@@ -46,7 +47,7 @@ beetle_scores <- open_dataset(s3_beetle) |>
   filter(reference_datetime %in% get_refdates,
          model_id == "tg_randfor",
          site_id %in% get_sites,
-         variable == "abundance") |> 
+         variable %in% get_variables) |> 
   collect() |> 
   mutate(horizon = as.numeric(as_date(datetime) - as_date(reference_datetime)))
 
@@ -54,7 +55,7 @@ terr_scores <- open_dataset(s3_terr) |>
   filter(reference_datetime %in% get_refdates,
          model_id == "tg_randfor",
          site_id %in% get_sites,
-         variable == "nee") |> 
+         variable %in% get_variables) |> 
   collect() |> 
   mutate(horizon = as.numeric(as_date(datetime) - as_date(reference_datetime)))
 
@@ -62,11 +63,11 @@ pheno_scores <- open_dataset(s3_pheno) |>
   filter(reference_datetime %in% get_refdates,
          model_id == "tg_randfor",
          site_id %in% get_sites,
-         variable == "rcc90") |> 
+         variable %in% get_variables) |> 
   collect() |> 
   mutate(horizon = as.numeric(as_date(datetime) - as_date(reference_datetime)))
 
-scores_df <- bind_rows(aq_scores, beetle_scores,terr_scores)
+scores_df <- bind_rows(aq_scores, beetle_scores,terr_scores) # fix pheno
 
 ```
 
