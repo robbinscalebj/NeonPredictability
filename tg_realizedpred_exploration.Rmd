@@ -18,6 +18,35 @@ source(here("download_target.R"))
 
 Ripping this code from Freya Olsson's tutorial: https://github.com/OlssonF/NEON-forecast-challenge-workshop/blob/main/Analyse_scores/Get_scores_tutorial.Rmd
 
+# Vision for new forecasts
+- Rerun random forest
+-- Fill in gaps
+-- Make sure we know where forecasts start and end (e.g., run forecasts from January to January)
+
+- New model structure
+-- Incorporate initial conditions
+-- Incorporate time series window training
+
+- New model sensitivity analysis
+-- How sensitive are results to:
+--- Data availability
+--- Models updating
+--- Training conditions
+--- Site as predictor (one model all sites)
+
+# Vision for analysis
+- Questions: 
+-- How does predictability vary across ecological variables, time, and spatial scales?
+--- Are different ecological variables more predictable than others? 
+
+- Response variable
+-- Normed RMSE (preferably) or normed R2
+-- Aggregate for error metric - monthly scale (n = 4 for beetles and ticks, n = ~30 for others)
+-- Normalizing to null model could be problematic - for example, the persistence, mean, or climatology models offer information that could make it look like our model predictability is lower, just because the null model predicted well. Maybe that's the point.
+
+
+# Download forecasts
+
 ```{r}
 s3_aquatic <- arrow::s3_bucket(bucket = "neon4cast-scores/parquet/aquatics", endpoint_override= "data.ecoforecast.org")
 s3_pheno <- arrow::s3_bucket(bucket = "neon4cast-scores/parquet/phenology", endpoint_override= "data.ecoforecast.org")
@@ -61,7 +90,7 @@ terr_scores <- open_dataset(s3_terr) |>
 
 pheno_scores <- open_dataset(s3_pheno) |>
   filter(reference_datetime %in% get_refdates,
-         model_id == "tg_randfor",
+        # model_id == "tg_randfor",
          site_id %in% get_sites,
          variable %in% get_variables) |> 
   collect() |> 
@@ -70,8 +99,58 @@ pheno_scores <- open_dataset(s3_pheno) |>
 scores_df <- bind_rows(aq_scores, beetle_scores,terr_scores) # fix pheno
 
 ```
+#download historical means
+```{r}
+
+targets_vec <- c("aquatics", "terrestrial_daily", "beetles")
+
+aq_hist <- map(targets_vec, ~download_target(.))|>
+  list_rbind()
+
+hist_mean_obs <- aq_hist|>
+  filter(datetime < as_date ("2023-01-01"))|>
+  group_by(variable, site_id)|>
+  summarize(mean_historical_observation = mean(observation, na.rm = TRUE))
+
+
+```
+
+```{r calculate error metric}
+
+test <- scores_df|>filter(site_id == "ARIK")|>
+  #filter(variable == "temperature", site_id == "ARIK", reference_datetime %in% c("2023-04-14", "2023-04-15","2023-05-14", "2023-05-15"))|>
+  left_join(hist_mean_obs)
+
+df2 <- test|>group_by(variable)|>
+  mutate(forecast_month = month(reference_datetime))|>
+  filter(horizon >= 0)|>
+  relocate(forecast_month)|>
+  mutate(modobs_diff = observation-mean)|>
+  group_by(variable, reference_datetime, site_id)|>
+  mutate(initial_obs = first(observation))|>
+  group_by(variable, horizon, forecast_month, site_id)|>
+  summarize(mean_hist_obs = mean(mean_historical_observation), #simplifies summarisation - same value being averaged so nothing changed
+            N_non_na_obs = sum(!is.na(modobs_diff)),
+            randfor_rmse = sqrt(sum((modobs_diff)^2, na.rm = TRUE))/n(),
+            randfor_rmse2 = sqrt(sum((modobs_diff)^2, na.rm = TRUE))/N_non_na_obs, #test with non-NA
+            randfor_rmse_normed = randfor_rmse/mean_hist_obs,
+            persistence_rmse = sqrt(sum((initial_obs)^2, na.rm = TRUE))/n(), #don't know if n(0 correctly counting NAs)
+            persistence_rmse_normed = persistence_rmse/mean_hist_obs,
+            forecast_skill = 1 - (randfor_rmse_normed/persistence_rmse_normed)
+            )
+
+# there appear to be no nee observations at SOAP for at least a time period
+
+
+blah <- scores_df|>group_by(variable)|>slice_head(n = 10000)|>filter(variable == "nee" & site_id == "SOAP")
+```
 
 ```{r}
+
+ggplot(df2|>filter(variable == "temperature"), aes(x = horizon, y = observation))+
+  geom_point()
+```
+
 
 ggplot(data = blah, aes(x = horizon, y = mean-observation, color = variable))+
   geom_point()+
