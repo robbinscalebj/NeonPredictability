@@ -117,15 +117,17 @@ hist_mean_obs <- aq_hist|>
 
 ```{r calculate error metric}
 
-test <- scores_df|>filter(site_id == "ARIK")|>
+test <- scores_df|>#filter(site_id == "ARIK")|>
   #filter(variable == "temperature", site_id == "ARIK", reference_datetime %in% c("2023-04-14", "2023-04-15","2023-05-14", "2023-05-15"))|>
   left_join(hist_mean_obs)
+unique(test$site_id)
 
 df2 <- test|>group_by(variable)|>
   mutate(forecast_month = month(reference_datetime))|>
   filter(horizon >= 0)|>
   relocate(forecast_month)|>
-  mutate(modobs_diff = observation-mean)|>
+  mutate(modobs_diff = observation-mean,
+         modmean_diff = observation - mean_historical_observation)|>
   group_by(variable, reference_datetime, site_id)|>
   mutate(initial_obs = first(observation))|>
   group_by(variable, horizon, forecast_month, site_id)|>
@@ -136,19 +138,38 @@ df2 <- test|>group_by(variable)|>
             randfor_rmse_normed = randfor_rmse/mean_hist_obs,
             persistence_rmse = sqrt(sum((initial_obs)^2, na.rm = TRUE))/n(), #don't know if n(0 correctly counting NAs)
             persistence_rmse_normed = persistence_rmse/mean_hist_obs,
-            forecast_skill = 1 - (randfor_rmse_normed/persistence_rmse_normed)
+            forecast_skill = 1 - (randfor_rmse_normed/persistence_rmse_normed),
+            R2_num = sum((modobs_diff)^2, na.rm = TRUE),
+            R2_denom = sum((modmean_diff)^2, na.rm = TRUE),
+            R2 = 1-(R2_num/R2_denom)
             )
 
 # there appear to be no nee observations at SOAP for at least a time period
 
 
 blah <- scores_df|>group_by(variable)|>slice_head(n = 10000)|>filter(variable == "nee" & site_id == "SOAP")
+blah <- df2|>filter(R2<0)
 ```
 
 ```{r}
 
 ggplot(df2|>filter(variable == "temperature"), aes(x = horizon, y = observation))+
   geom_point()
+
+ggplot(df2|>filter(variable == "nee", is.numeric(R2), R2 >=0), aes(x = horizon, y = R2, color = forecast_month))+
+         geom_point()+
+  facet_grid(.~forecast_month)
+
+df_test <- df2|>filter(variable == "temperature", is.numeric(R2), R2 >=0)|>
+  group_by(forecast_month, horizon)|>
+  summarize(mean = mean(R2), 
+            sd = sd(R2))
+
+ggplot(df_test)+
+  geom_point(aes(x = horizon, y = mean))+
+  geom_errorbar(aes(x = horizon, ymin = mean-sd, ymax = mean+sd))+
+  facet_grid(.~forecast_month)
+
 ```
 
 
@@ -167,7 +188,7 @@ ggplot(data = score_sums|>filter(variable == "oxygen"), aes(x = horizon, y = r_s
 
 #suppose what we want to do is aggregate scores for each forecast horizon
 
-```
+
 
 View time series observations
 
@@ -210,5 +231,21 @@ beetle_t<- beetle_df|>
 ggplot(beetle_df|>mutate()|>filter(variable == "richness"), 
        aes(x = datetime, y = observation, color = site_id))+
   geom_line()
+
+```
+
+
+```{r}
+library(mgcv)
+nee_df <- df2|>ungroup()|>filter(variable == "nee", is.numeric(R2), R2 >=0)|>
+  mutate(forecast_month = as_factor(forecast_month),
+         site_id = as_factor(site_id))|>
+  mutate(month_site = interaction(forecast_month, site_id))
+
+
+m1 <- gam(R2 ~ s(horizon)+
+            s(horizon, by = month_site), 
+          data = nee_df)
+
 
 ```
