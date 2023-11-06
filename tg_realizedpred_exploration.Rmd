@@ -62,7 +62,7 @@ get_sites <- readr::read_csv("https://raw.githubusercontent.com/eco4cast/neon4ca
   select(field_site_id) |> #slice_head(n = 5)|>
   pull() # get in a vector
 
-get_variables <- c('temperature', 'oxygen', "gcc90", "nee", "abundance")
+get_variables <- c('temperature', 'oxygen', "gcc_90", "nee", "abundance")
 
 aq_scores <- open_dataset(s3_aquatic) |>
   filter(reference_datetime %in% get_refdates,
@@ -99,15 +99,41 @@ pheno_scores <- open_dataset(s3_pheno) |>
 scores_df <- bind_rows(aq_scores, beetle_scores,terr_scores) # fix pheno
 
 ```
+
+#Download locally re-run forecasts
+
+fc_list <- list.files("D:/EFI_Forecast_Reruns/", full.names = TRUE)
+tic()
+plan(multisession, workers = 4)
+forecasts <- future_map(fc_list, ~read_csv(.)|>
+                   group_by(variable,datetime,reference_datetime, site_id)|>
+                   summarize(mean = mean(prediction), sd = sd(prediction)))|>
+  list_rbind()|>
+  mutate(horizon = interval(reference_datetime, datetime)|>as.numeric("days"))
+toc()
+
+
+write_parquet(forecasts, sink = here("Summarized_Forecasts/randfor.parquet"))
+```{r}
+forecasts <- read_parquet(here("Summarized_Forecasts/randfor.parquet"))
+```
+
 #download historical means
 ```{r}
 
-targets_vec <- c("aquatics", "terrestrial_daily", "beetles")
+targets_vec <- c("aquatics", "terrestrial_daily", "beetles", "ticks", "phenology")
 
-aq_hist <- map(targets_vec, ~download_target(.))|>
+blah <- download_target("phenology")
+
+tar_hist <- map(targets_vec, ~download_target(.))|>
   list_rbind()
 
-hist_mean_obs <- aq_hist|>
+ggplot(data = tar_hist|>filter(variable == "oxygen"), aes(x = datetime, y = observation))+
+  geom_point()+
+  facet_grid(.~variable)
+# no post 2022 beetle data, only two observations for Amblyomma
+  
+hist_mean_obs <- tar_hist|>
   filter(datetime < as_date ("2023-01-01"))|>
   group_by(variable, site_id)|>
   summarize(mean_historical_observation = mean(observation, na.rm = TRUE))
@@ -116,8 +142,10 @@ hist_mean_obs <- aq_hist|>
 ```
 
 ```{r calculate error metric}
+forecasts2 <- forecasts|>
+  left_join(tar_hist)
 
-test <- scores_df|>#filter(site_id == "ARIK")|>
+test <- forecasts2|>#filter(site_id == "ARIK")|>
   #filter(variable == "temperature", site_id == "ARIK", reference_datetime %in% c("2023-04-14", "2023-04-15","2023-05-14", "2023-05-15"))|>
   left_join(hist_mean_obs)
 unique(test$site_id)
@@ -160,7 +188,10 @@ ggplot(df2|>filter(variable == "nee", is.numeric(R2), R2 >=0), aes(x = horizon, 
          geom_point()+
   facet_grid(.~forecast_month)
 
-df_test <- df2|>filter(variable == "temperature", is.numeric(R2), R2 >=0)|>
+test <- df2|>filter(variable == "abundance")|>filter(!is.na(R2))
+test2<-forecasts2|>filter(variable == "abundance", !is.na(observation))
+
+df_test <- df2|>filter(variable == "gcc_90", is.numeric(R2), R2 >=0)|>
   group_by(forecast_month, horizon)|>
   summarize(mean = mean(R2), 
             sd = sd(R2))
