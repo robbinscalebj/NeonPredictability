@@ -123,15 +123,29 @@ forecasts <- read_parquet(here("Summarized_Forecasts/randfor.parquet"))
 
 targets_vec <- c("aquatics", "terrestrial_daily", "beetles", "ticks", "phenology")
 
-blah <- download_target("phenology")
-
+blah <- download_target("beetles")
+beet_test <- read_csv("https://data.ecoforecast.org/neon4cast-targets/beetles/beetles-targets.csv.gz", guess_max = 1e6)
 tar_hist <- map(targets_vec, ~download_target(.))|>
   list_rbind()
 
 ggplot(data = tar_hist|>filter(variable == "oxygen"), aes(x = datetime, y = observation))+
   geom_point()+
   facet_grid(.~variable)
-# no post 2022 beetle data, only two observations for Amblyomma
+
+ggplot(data = beet_test|>filter(variable == "richness"), aes(x = datetime, y = observation))+
+  geom_point()+
+  facet_grid(.~variable)
+
+ggplot(data = beet_test|>filter(variable == "richness")|>mutate(year = year(datetime)), aes(x = datetime, y = observation))+
+  geom_histogram()+
+  facet_grid(.~year)
+
+ggplot(data = beet_test|>
+         mutate(year = as_factor(year(datetime)))|>
+         filter(variable == "richness", datetime > as_date("2019-01-01")), 
+       aes(x = observation, color = year))+
+  geom_density()+
+  facet_wrap(.~year)
   
 hist_mean_obs <- tar_hist|>
   filter(datetime < as_date ("2023-01-01"))|>
@@ -237,13 +251,61 @@ ggplot(data = modobs, aes(x = target_variable, y = n_obs))+
 
 
 ```{r}
-unique(scores_df$variable)
-m1 <- gam(data = scores_df, 
-          s(horizon, by = variable) +
-          s(horizon, by = c(variable, season))+
-          s(variable, bs = "re")+
+df_gam <- df2|>filter(!(variable %in% c("abundance", "richness", "amblyomma_americanum")))|>
+  filter(is.numeric(R2), R2 >0 & R2 <1)|>
+  mutate(variable = as_factor(variable),
+         forecast_month = as_factor(forecast_month),
+         site_id = as_factor(site_id))|>
+  mutate(var_month = interaction(forecast_month, variable))
+unique(df_gam$var_month)
+
+cl <- parallel::makeCluster(4)
+#this runs pretty fast
+m0 <- bam(data = df_gam, R2 ~ horizon + variable + var_month +
+          s(horizon, by = variable)+
+          s(horizon, by = var_month)+
           s(site_id, bs = "re")+
-          s(site_id, horizon, bs = "re"))
+          s(site_id, horizon, bs = "re"),
+          clsuter = cl)
+
+write_rds(m0, here("test_gam.rds"))
+
+
+
+```
+
+```{r}
+summary(m0)
+
+m0.pred <- predict_gam(m0, length_out = 100, exclude_terms = c("s(site_id)", "s(site_id,horizon)"),
+                       values = list(site_id = NULL, horizon = seq(1,30, by = 1)))|>
+  separate_wider_delim(cols = var_month, names = c("forecast_month", "blah"), delim = ".")|>
+  mutate(forecast_month = as.numeric(forecast_month))|>
+  mutate(forecast_month_abb = case_when(forecast_month == "1" ~ "Jan",
+                                        forecast_month == "2" ~ "Feb",
+                                        forecast_month == "3" ~ "Mar",
+                                        forecast_month == "4" ~ "Apr",
+                                        forecast_month == "5" ~ "May",
+                                        forecast_month == "6" ~ "June",
+                                        forecast_month == "7" ~ "July",
+                                        forecast_month == "8" ~ "Aug",
+                                        forecast_month == "9" ~ "Sep",
+                                        forecast_month == "10" ~ "Oct"),#jeez, I know there's a shorter way to recode this
+         forecast_month_abb = fct_reorder(forecast_month_abb, forecast_month),
+         variable = fct_recode(variable,`Chlorophyll-a`= "chla", Greenness = "gcc_90", Redness = "rcc_90", Evapotranspiration = "le", `Net Ecosystem Exchange` = "nee", `Dissolved O2` = "oxygen",  `Water Temp` = "temperature")) 
+
+ggplot(data = m0.pred, aes(x = horizon, y = R2, color = variable))+
+  geom_smooth(se=FALSE)+
+  facet_wrap(.~forecast_month_abb)+
+  xlab("Forecast Horizon (days)")+
+  ylab(bquote(bold(R^2)))+
+  theme_bw()+
+  theme(legend.position  = c(0.75,0.15), legend.title = element_blank(),
+        axis.title.y = element_text(size = 18),axis.title.x = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(face = "bold"), axis.text.y = element_text(face = "bold"),
+        strip.text = element_text(face = "bold", size = 12), legend.text = element_text(size = 10, face = "bold"))+
+  guides(color=guide_legend(nrow=4))
+
 
 
 ```
