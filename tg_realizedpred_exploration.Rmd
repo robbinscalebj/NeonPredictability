@@ -12,6 +12,8 @@ library(here)
 library(arrow)
 library(neon4cast)
 library(yardstick)
+library(mgcv)
+library(tidymv)
 source(here("download_target.R"))
 ```
 
@@ -150,7 +152,8 @@ ggplot(data = beet_test|>
 hist_mean_obs <- tar_hist|>
   filter(datetime < as_date ("2023-01-01"))|>
   group_by(variable, site_id)|>
-  summarize(mean_historical_observation = mean(observation, na.rm = TRUE))
+  summarize(mean_historical_observation = mean(observation, na.rm = TRUE),
+            iq_range = quantile(observation,0.75, na.rm = TRUE)-quantile(observation, 0.25, na.rm = TRUE))
 
 
 ```
@@ -172,19 +175,22 @@ df2 <- test|>group_by(variable)|>
          modmean_diff = observation - mean_historical_observation)|>
   group_by(variable, reference_datetime, site_id)|>
   mutate(initial_obs = first(observation))|>
-  group_by(variable, horizon, forecast_month, site_id)|>
+  group_by(variable, horizon, site_id)|>
   summarize(mean_hist_obs = mean(mean_historical_observation), #simplifies summarisation - same value being averaged so nothing changed
             N_non_na_obs = sum(!is.na(modobs_diff)),
-            randfor_rmse = sqrt(sum((modobs_diff)^2, na.rm = TRUE))/n(),
-            randfor_rmse2 = sqrt(sum((modobs_diff)^2, na.rm = TRUE))/N_non_na_obs, #test with non-NA
+            randfor_rmse = sqrt(sum((modobs_diff)^2, na.rm = TRUE)/n()),
+            randfor_rmse2 = sqrt(sum((modobs_diff)^2, na.rm = TRUE)/N_non_na_obs), #test with non-NA
             randfor_rmse_normed = randfor_rmse/mean_hist_obs,
+            randfor_rmse_normed2 = randfor_rmse2/mean_hist_obs,
+            randfor_rmse_normed3 = randfor_rmse2/iq_range,
             persistence_rmse = sqrt(sum((initial_obs)^2, na.rm = TRUE))/n(), #don't know if n(0 correctly counting NAs)
             persistence_rmse_normed = persistence_rmse/mean_hist_obs,
             forecast_skill = 1 - (randfor_rmse_normed/persistence_rmse_normed),
             R2_num = sum((modobs_diff)^2, na.rm = TRUE),
             R2_denom = sum((modmean_diff)^2, na.rm = TRUE),
             R2 = 1-(R2_num/R2_denom)
-            )
+            )|>
+  filter(!(variable %in% c("abundance", "amblyomma_americanum", "richness")))
 
 # there appear to be no nee observations at SOAP for at least a time period
 
@@ -195,25 +201,20 @@ blah <- df2|>filter(R2<0)
 
 ```{r}
 
-ggplot(df2|>filter(variable == "temperature"), aes(x = horizon, y = observation))+
-  geom_point()
-
-ggplot(df2|>filter(variable == "nee", is.numeric(R2), R2 >=0), aes(x = horizon, y = R2, color = forecast_month))+
-         geom_point()+
-  facet_grid(.~forecast_month)
-
-test <- df2|>filter(variable == "abundance")|>filter(!is.na(R2))
-test2<-forecasts2|>filter(variable == "abundance", !is.na(observation))
-
-df_test <- df2|>filter(variable == "gcc_90", is.numeric(R2), R2 >=0)|>
-  group_by(forecast_month, horizon)|>
-  summarize(mean = mean(R2), 
-            sd = sd(R2))
-
-ggplot(df_test)+
-  geom_point(aes(x = horizon, y = mean))+
+ggplot(df2|>group_by(horizon, variable)|>summarize(mean = mean(randfor_rmse_normed3, na.rm = TRUE),sd = sd(randfor_rmse_normed3, na.rm = TRUE)), 
+       aes(x = horizon, y = mean, color = variable))+
   geom_errorbar(aes(x = horizon, ymin = mean-sd, ymax = mean+sd))+
-  facet_grid(.~forecast_month)
+  geom_smooth(method = "gam")+
+  facet_grid(.~variable)
+
+ggplot(df2|>group_by(variable, horizon, site_id)|>summarize(rmse_normed = mean(randfor_rmse_normed3,na.rm = TRUE)), 
+       aes(x = horizon, y = rmse_normed, color = variable))+
+  geom_point()+
+  facet_grid(.~variable)+
+  ylab("Interquartile-range Normalized RMSE")
+
+#which site is being predicted really poorly?
+blah <- df2|>filter(variable == "nee" &randfor_rmse_normed3>3.5) #CPER, but not because of a small IQR
 
 ```
 
@@ -292,7 +293,8 @@ m0.pred <- predict_gam(m0, length_out = 100, exclude_terms = c("s(site_id)", "s(
                                         forecast_month == "9" ~ "Sep",
                                         forecast_month == "10" ~ "Oct"),#jeez, I know there's a shorter way to recode this
          forecast_month_abb = fct_reorder(forecast_month_abb, forecast_month),
-         variable = fct_recode(variable,`Chlorophyll-a`= "chla", Greenness = "gcc_90", Redness = "rcc_90", Evapotranspiration = "le", `Net Ecosystem Exchange` = "nee", `Dissolved O2` = "oxygen",  `Water Temp` = "temperature")) 
+         variable = fct_recode(variable,`Chlorophyll-a`= "chla", Greenness = "gcc_90", Redness = "rcc_90", Evapotranspiration = "le", `Net Ecosystem Exchange` = "nee", `Dissolved O2` = "oxygen",  `Water Temp` = "temperature"))|>
+  rename(R2 = "fit")
 
 ggplot(data = m0.pred, aes(x = horizon, y = R2, color = variable))+
   geom_smooth(se=FALSE)+
