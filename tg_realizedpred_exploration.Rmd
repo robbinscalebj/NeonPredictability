@@ -188,7 +188,8 @@ df2 <- test|>group_by(variable)|>
             forecast_skill = 1 - (randfor_rmse_normed/persistence_rmse_normed),
             R2_num = sum((modobs_diff)^2, na.rm = TRUE),
             R2_denom = sum((modmean_diff)^2, na.rm = TRUE),
-            R2 = 1-(R2_num/R2_denom)
+            R2 = 1-(R2_num/R2_denom), # this is also NSE 
+            NSE_normed = 1/(2-R2)
             )|>
   filter(!(variable %in% c("abundance", "amblyomma_americanum", "richness")))
 
@@ -207,11 +208,23 @@ ggplot(df2|>group_by(horizon, variable)|>summarize(mean = mean(randfor_rmse_norm
   geom_smooth(method = "gam")+
   facet_grid(.~variable)
 
+ggplot(df2|>group_by(horizon, variable)|>summarize(mean = mean(NSE_normed, na.rm = TRUE),sd = sd(NSE_normed, na.rm = TRUE)), 
+       aes(x = horizon, y = mean, color = variable))+
+  geom_errorbar(aes(x = horizon, ymin = mean-sd, ymax = mean+sd))+
+  geom_smooth(method = "gam")+
+  facet_grid(.~variable)
+
 ggplot(df2|>group_by(variable, horizon, site_id)|>summarize(rmse_normed = mean(randfor_rmse_normed3,na.rm = TRUE)), 
        aes(x = horizon, y = rmse_normed, color = variable))+
   geom_point()+
   facet_grid(.~variable)+
   ylab("Interquartile-range Normalized RMSE")
+
+ggplot(df2|>group_by(variable, horizon, site_id)|>summarize(NSE_normed = mean(NSE_normed,na.rm = TRUE)), 
+       aes(x = horizon, y = NSE_normed, color = variable))+
+  geom_point()+
+  facet_grid(.~variable)+
+  ylab("Normalized NSE")
 
 #which site is being predicted really poorly?
 blah <- df2|>filter(variable == "nee" &randfor_rmse_normed3>3.5) #CPER, but not because of a small IQR
