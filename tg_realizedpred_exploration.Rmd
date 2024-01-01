@@ -196,7 +196,7 @@ df2 <- test|>group_by(variable)|>
 # there appear to be no nee observations at SOAP for at least a time period
 
 
-blah <- scores_df|>group_by(variable)|>slice_head(n = 10000)|>filter(variable == "nee" & site_id == "SOAP")
+#blah <- scores_df|>group_by(variable)|>slice_head(n = 10000)|>filter(variable == "nee" & site_id == "SOAP")
 blah <- df2|>filter(R2<0)
 ```
 
@@ -227,7 +227,7 @@ ggplot(df2|>group_by(variable, horizon, site_id)|>summarize(NSE_normed = mean(NS
   ylab("Normalized NSE")
 
 #which site is being predicted really poorly?
-blah <- df2|>filter(variable == "nee" &randfor_rmse_normed3>3.5) #CPER, but not because of a small IQR
+#blah <- df2|>filter(variable == "nee" &randfor_rmse_normed3>3.5) #CPER, but not because of a small IQR
 
 ```
 
@@ -262,25 +262,45 @@ ggplot(data = modobs, aes(x = target_variable, y = n_obs))+
 
 ```
 
+# GAM
 
+Follow model 'GS' in Pedersen et al "Hierarchical GAMs" in PeerJ
+slowly add following components:
+s(horizon, by = "var)+
+s(horizon, site, bs = "sz", by = var)+
+____________________
+s(week, bs= "cc", by = var)+ # or doy or whatever temporal component
+_____________________________________
+s(week, site, bs = "fs", xt = list(bs = "cc"), by = var)+
+______________________________
+ti(horizon, doy, by = "var) # weirder thing to ask?
+
+Consider beta distribution, but might not be super important - what is probot/logit of NSE?
 
 ```{r}
 df_gam <- df2|>filter(!(variable %in% c("abundance", "richness", "amblyomma_americanum")))|>
-  filter(is.numeric(R2), R2 >0 & R2 <1)|>
+ # filter(is.numeric(R2), R2 >0 & R2 <1)|>
   mutate(variable = as_factor(variable),
-         forecast_month = as_factor(forecast_month),
+         #forecast_month = as_factor(forecast_month),
          site_id = as_factor(site_id))|>
   mutate(var_month = interaction(forecast_month, variable))
 unique(df_gam$var_month)
 
-cl <- parallel::makeCluster(4)
+cl <- parallel::makeCluster(12)
 #this runs pretty fast
-m0 <- bam(data = df_gam, R2 ~ horizon + variable + var_month +
+m0 <- bam(data = df_gam, NSE_normed ~ horizon + variable +
           s(horizon, by = variable)+
-          s(horizon, by = var_month)+
+          #s(horizon, by = var_month)+
           s(site_id, bs = "re")+
           s(site_id, horizon, bs = "re"),
-          clsuter = cl)
+          cluster = cl)
+
+m1 <- bam(data = df_gam, NSE_normed ~ horizon + variable +
+          s(horizon, by = variable)+
+          #s(horizon, by = var_month)+
+          s(site_id, bs = "re")+
+          s(site_id, horizon, bs = "re"),
+          cluster = cl)
 
 write_rds(m0, here("test_gam.rds"))
 
@@ -293,27 +313,28 @@ summary(m0)
 
 m0.pred <- predict_gam(m0, length_out = 100, exclude_terms = c("s(site_id)", "s(site_id,horizon)"),
                        values = list(site_id = NULL, horizon = seq(1,30, by = 1)))|>
-  separate_wider_delim(cols = var_month, names = c("forecast_month", "blah"), delim = ".")|>
-  mutate(forecast_month = as.numeric(forecast_month))|>
-  mutate(forecast_month_abb = case_when(forecast_month == "1" ~ "Jan",
-                                        forecast_month == "2" ~ "Feb",
-                                        forecast_month == "3" ~ "Mar",
-                                        forecast_month == "4" ~ "Apr",
-                                        forecast_month == "5" ~ "May",
-                                        forecast_month == "6" ~ "June",
-                                        forecast_month == "7" ~ "July",
-                                        forecast_month == "8" ~ "Aug",
-                                        forecast_month == "9" ~ "Sep",
-                                        forecast_month == "10" ~ "Oct"),#jeez, I know there's a shorter way to recode this
-         forecast_month_abb = fct_reorder(forecast_month_abb, forecast_month),
+  #separate_wider_delim(cols = var_month, names = c("forecast_month", "blah"), delim = ".")|>
+  #mutate(forecast_month = as.numeric(forecast_month))|>
+  mutate(
+  #forecast_month_abb = case_when(forecast_month == "1" ~ "Jan",
+  #                                      forecast_month == "2" ~ "Feb",
+  #                                      forecast_month == "3" ~ "Mar",
+  #                                      forecast_month == "4" ~ "Apr",
+  #                                      forecast_month == "5" ~ "May",
+  #                                      forecast_month == "6" ~ "June",
+  #                                      forecast_month == "7" ~ "July",
+  #                                      forecast_month == "8" ~ "Aug",
+  #                                      forecast_month == "9" ~ "Sep",
+  #                                      forecast_month == "10" ~ "Oct"),#jeez, I know there's a shorter way to recode this
+         #forecast_month_abb = fct_reorder(forecast_month_abb, forecast_month),
          variable = fct_recode(variable,`Chlorophyll-a`= "chla", Greenness = "gcc_90", Redness = "rcc_90", Evapotranspiration = "le", `Net Ecosystem Exchange` = "nee", `Dissolved O2` = "oxygen",  `Water Temp` = "temperature"))|>
   rename(R2 = "fit")
 
 ggplot(data = m0.pred, aes(x = horizon, y = R2, color = variable))+
   geom_smooth(se=FALSE)+
-  facet_wrap(.~forecast_month_abb)+
+  #facet_wrap(.~forecast_month_abb)+
   xlab("Forecast Horizon (days)")+
-  ylab(bquote(bold(R^2)))+
+  ylab("Normed NSE")+
   theme_bw()+
   theme(legend.position  = c(0.75,0.15), legend.title = element_blank(),
         axis.title.y = element_text(size = 18),axis.title.x = element_text(size = 18, face = "bold"),
