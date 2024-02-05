@@ -14,6 +14,7 @@ library(neon4cast)
 library(yardstick)
 library(mgcv)
 library(tidymv)
+library(tictoc)
 source(here("download_target.R"))
 ```
 
@@ -127,6 +128,7 @@ targets_vec <- c("aquatics", "terrestrial_daily", "beetles", "ticks", "phenology
 
 blah <- download_target("beetles")
 beet_test <- read_csv("https://data.ecoforecast.org/neon4cast-targets/beetles/beetles-targets.csv.gz", guess_max = 1e6)
+
 tar_hist <- map(targets_vec, ~download_target(.))|>
   list_rbind()
 
@@ -160,29 +162,34 @@ hist_mean_obs <- tar_hist|>
 
 ```{r calculate error metric}
 forecasts2 <- forecasts|>
-  left_join(tar_hist)
-
-test <- forecasts2|>#filter(site_id == "ARIK")|>
+  left_join(tar_hist)|>#filter(site_id == "ARIK")|>
   #filter(variable == "temperature", site_id == "ARIK", reference_datetime %in% c("2023-04-14", "2023-04-15","2023-05-14", "2023-05-15"))|>
   left_join(hist_mean_obs)
-unique(test$site_id)
 
-df2 <- test|>group_by(variable)|>
-  mutate(forecast_month = month(reference_datetime))|>
+blah <- df2|>filter(site_id == "ARIK", variable == "temperature")
+ ggplot()+geom_point(data = blah, aes(x = reference_datetime, y = forecast_week))
+ 
+unique(forecasts2$site_id)
+
+df2 <- forecasts2|>
+  filter(!(variable %in% c("abundance", "amblyomma_americanum", "richness")))|>
+  group_by(variable)|>
+  mutate(forecast_month = month(reference_datetime),
+         forecast_week = week(reference_datetime))|>
   filter(horizon >= 0)|>
-  relocate(forecast_month)|>
+  relocate(forecast_week)|>
   mutate(modobs_diff = observation-mean,
          modmean_diff = observation - mean_historical_observation)|>
   group_by(variable, reference_datetime, site_id)|>
   mutate(initial_obs = first(observation))|>
-  group_by(variable, horizon, site_id)|>
+  group_by(variable, horizon, site_id, forecast_week)|>
   summarize(mean_hist_obs = mean(mean_historical_observation), #simplifies summarisation - same value being averaged so nothing changed
             N_non_na_obs = sum(!is.na(modobs_diff)),
             randfor_rmse = sqrt(sum((modobs_diff)^2, na.rm = TRUE)/n()),
             randfor_rmse2 = sqrt(sum((modobs_diff)^2, na.rm = TRUE)/N_non_na_obs), #test with non-NA
             randfor_rmse_normed = randfor_rmse/mean_hist_obs,
             randfor_rmse_normed2 = randfor_rmse2/mean_hist_obs,
-            randfor_rmse_normed3 = randfor_rmse2/iq_range,
+            #randfor_rmse_normed3 = randfor_rmse2/iq_range, 
             persistence_rmse = sqrt(sum((initial_obs)^2, na.rm = TRUE))/n(), #don't know if n(0 correctly counting NAs)
             persistence_rmse_normed = persistence_rmse/mean_hist_obs,
             forecast_skill = 1 - (randfor_rmse_normed/persistence_rmse_normed),
@@ -190,8 +197,7 @@ df2 <- test|>group_by(variable)|>
             R2_denom = sum((modmean_diff)^2, na.rm = TRUE),
             R2 = 1-(R2_num/R2_denom), # this is also NSE 
             NSE_normed = 1/(2-R2)
-            )|>
-  filter(!(variable %in% c("abundance", "amblyomma_americanum", "richness")))
+            )
 
 # there appear to be no nee observations at SOAP for at least a time period
 
@@ -232,20 +238,6 @@ ggplot(df2|>group_by(variable, horizon, site_id)|>summarize(NSE_normed = mean(NS
 ```
 
 
-ggplot(data = blah, aes(x = horizon, y = mean-observation, color = variable))+
-  geom_point()+
-  facet_wrap(.~site_id)
-
-# calculate R 2 for each forecast horizon and site
-
-score_sums <- scores_df|>filter(horizon >=0)|>mutate(month = month(reference_datetime))|>group_by(variable,horizon, site_id, month)|>rsq(truth = observation, estimate = median)|>rename(r_squared = ".estimate")
-
-ggplot(data = score_sums|>filter(variable == "oxygen"), aes(x = horizon, y = r_squared))+
-  geom_point()+
-  facet_wrap(.~month)+
-  geom_smooth(method = "gam")
-
-#suppose what we want to do is aggregate scores for each forecast horizon
 
 
 
@@ -273,64 +265,86 @@ s(week, bs= "cc", by = var)+ # or doy or whatever temporal component
 _____________________________________
 s(week, site, bs = "fs", xt = list(bs = "cc"), by = var)+
 ______________________________
-ti(horizon, doy, by = "var) # weirder thing to ask?
+ti(horizon, doy, by = var)
 
-Consider beta distribution, but might not be super important - what is probot/logit of NSE?
+# Reduced GAM test
+
+Test out GAM model predictions on a few sites and variables
+```{r}
+df_gam <- df2|>
+  ungroup()|>
+  filter(variable %in% c("temperature", "gcc_90"), site_id %in% c("ARIK", "BARR"))|>
+  mutate(variable = as_factor(variable),
+         site_id = as_factor(site_id))
+
+unique(df_gam$site_id)
+
+```
+
 
 ```{r}
-df_gam <- df2|>filter(!(variable %in% c("abundance", "richness", "amblyomma_americanum")))|>
- # filter(is.numeric(R2), R2 >0 & R2 <1)|>
-  mutate(variable = as_factor(variable),
-         #forecast_month = as_factor(forecast_month),
-         site_id = as_factor(site_id))|>
-  mutate(var_month = interaction(forecast_month, variable))
-unique(df_gam$var_month)
-
 cl <- parallel::makeCluster(12)
 #this runs pretty fast
 m0 <- bam(data = df_gam, NSE_normed ~ horizon + variable +
           s(horizon, by = variable)+
-          #s(horizon, by = var_month)+
-          s(site_id, bs = "re")+
-          s(site_id, horizon, bs = "re"),
+          s(horizon, site_id, bs = "sz", by = variable),
           cluster = cl)
 
 m1 <- bam(data = df_gam, NSE_normed ~ horizon + variable +
           s(horizon, by = variable)+
-          #s(horizon, by = var_month)+
-          s(site_id, bs = "re")+
-          s(site_id, horizon, bs = "re"),
+          s(horizon, site_id, bs = "sz", by = variable)+
+          s(forecast_week, bs= "cc", by = variable),
           cluster = cl)
 
-write_rds(m0, here("test_gam.rds"))
+m2 <- bam(data = df_gam, NSE_normed ~ horizon + variable +
+          s(horizon, by = variable)+
+          s(horizon, site_id, bs = "sz", by = variable)+
+          s(forecast_week, bs= "cc", by = variable)+
+          s(forecast_week, site_id, bs = "fs", xt = list(bs = "cc"), by = variable),
+          cluster = cl)
 
+m3 <- bam(data = df_gam, NSE_normed ~ horizon + variable +
+          s(horizon, by = variable)+
+          s(horizon, site_id, bs = "sz", by = variable)+
+          s(forecast_week, bs= "cc", by = variable)+
+          s(forecast_week, site_id, bs = "fs", xt = list(bs = "cc"), by = variable)+
+          ti(horizon, forecast_week, by = variable),
+          cluster = cl)
 
+m3.beta <- bam(data = df_gam, NSE_normed ~ horizon + variable +
+          s(horizon, by = variable)+
+          s(horizon, site_id, bs = "sz", by = variable)+
+          s(forecast_week, bs= "cc", by = variable)+
+          s(forecast_week, site_id, bs = "fs", xt = list(bs = "cc"), by = variable)+
+          ti(horizon, forecast_week, by = variable),
+          family = betar,
+          #discrete = TRUE,
+          cluster = cl)
+
+m3.beta_noint <- bam(data = df_gam, NSE_normed ~ horizon +
+          s(horizon, by = variable)+
+          s(horizon, site_id, bs = "sz", by = variable)+
+          s(forecast_week, bs= "cc", by = variable)+
+          s(forecast_week, site_id, bs = "fs", xt = list(bs = "cc"), by = variable)+
+          ti(horizon, forecast_week, by = variable),
+          family = betar,
+          #discrete = TRUE,
+          cluster = cl)
 
 ```
 
 ```{r}
+
+#m0
+
 summary(m0)
 
-m0.pred <- predict_gam(m0, length_out = 100, exclude_terms = c("s(site_id)", "s(site_id,horizon)"),
+m0.pred <- predict_gam(m0, length_out = 100, 
                        values = list(site_id = NULL, horizon = seq(1,30, by = 1)))|>
-  #separate_wider_delim(cols = var_month, names = c("forecast_month", "blah"), delim = ".")|>
-  #mutate(forecast_month = as.numeric(forecast_month))|>
-  mutate(
-  #forecast_month_abb = case_when(forecast_month == "1" ~ "Jan",
-  #                                      forecast_month == "2" ~ "Feb",
-  #                                      forecast_month == "3" ~ "Mar",
-  #                                      forecast_month == "4" ~ "Apr",
-  #                                      forecast_month == "5" ~ "May",
-  #                                      forecast_month == "6" ~ "June",
-  #                                      forecast_month == "7" ~ "July",
-  #                                      forecast_month == "8" ~ "Aug",
-  #                                      forecast_month == "9" ~ "Sep",
-  #                                      forecast_month == "10" ~ "Oct"),#jeez, I know there's a shorter way to recode this
-         #forecast_month_abb = fct_reorder(forecast_month_abb, forecast_month),
-         variable = fct_recode(variable,`Chlorophyll-a`= "chla", Greenness = "gcc_90", Redness = "rcc_90", Evapotranspiration = "le", `Net Ecosystem Exchange` = "nee", `Dissolved O2` = "oxygen",  `Water Temp` = "temperature"))|>
-  rename(R2 = "fit")
+  mutate(variable = fct_recode(variable,`Chlorophyll-a`= "chla", Greenness = "gcc_90", Redness = "rcc_90", Evapotranspiration = "le", `Net Ecosystem Exchange` = "nee", `Dissolved O2` = "oxygen",  `Water Temp` = "temperature"))|>
+  rename(NSE_normed = "fit")
 
-ggplot(data = m0.pred, aes(x = horizon, y = R2, color = variable))+
+ggplot(data = m0.pred, aes(x = horizon, y = NSE_normed, color = variable))+
   geom_smooth(se=FALSE)+
   #facet_wrap(.~forecast_month_abb)+
   xlab("Forecast Horizon (days)")+
@@ -344,37 +358,545 @@ ggplot(data = m0.pred, aes(x = horizon, y = R2, color = variable))+
 
 
 
+# m1
+summary(m1)
+blah <- df_gam|>group_by(variable, site_id, horizon, forecast_week)|>summarize(mean_nse = mean(NSE_normed,na.rm = TRUE))
+m1.pred <- predict_gam(m1, length_out = 100, 
+                       values = list(site_id = NULL, horizon = seq(0,30, by = 1), 
+                                     forecast_week = seq(1,max(df_gam$forecast_week)), by = 1))|>
+  #left_join(df_gam|>group_by(variable, site_id, horizon, forecast_week)|>summarize(mean_nse = mean(NSE_normed,na.rm = TRUE)))
+  mutate(variable = fct_recode(variable,`Chlorophyll-a`= "chla", Greenness = "gcc_90", Redness = "rcc_90", Evapotranspiration = "le", `Net Ecosystem Exchange` = "nee", `Dissolved O2` = "oxygen",  `Water Temp` = "temperature"))|>
+  rename(NSE_normed = "fit")|>
+  filter(forecast_week <40, forecast_week >37)|>
+  filter(variable == "Greenness")|>
+  mutate(forecast_week = as_factor(forecast_week))
+
+levels(m1.pred$forecast_week)
+
+ggplot(data = m1.pred, aes(x = horizon, y = NSE_normed, color = variable))+
+  geom_smooth(se=FALSE)+
+  geom_point(data = df_gam|>
+    filter(forecast_week <40, forecast_week >37)|>
+    filter(variable == "gcc_90")|>
+    mutate(forecast_week = as_factor(forecast_week)), aes(x = horizon, y = NSE_normed, color = variable))+
+  facet_wrap(.~forecast_week)+
+  xlab("Forecast Horizon (days)")+
+  ylab("Normed NSE")+
+  theme_bw()+
+  theme(legend.position  = c(0.75,0.15), legend.title = element_blank(),
+        axis.title.y = element_text(size = 18),axis.title.x = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(face = "bold"), axis.text.y = element_text(face = "bold"),
+        strip.text = element_text(face = "bold", size = 12), legend.text = element_text(size = 10, face = "bold"))+
+  guides(color=guide_legend(nrow=4))
+
+
+
+# m2
+summary(m2)
+
+m2.pred <- predict_gam(m2, length_out = 100, 
+                       values = list(site_id = NULL, horizon = seq(0,30, by = 1), 
+                                     forecast_week = seq(1,max(df_gam$forecast_week)), by = 1))|>
+  #left_join(df_gam|>group_by(variable, site_id, horizon, forecast_week)|>summarize(mean_nse = mean(NSE_normed,na.rm = TRUE)))
+  mutate(variable = fct_recode(variable,`Chlorophyll-a`= "chla", Greenness = "gcc_90", Redness = "rcc_90", Evapotranspiration = "le", `Net Ecosystem Exchange` = "nee", `Dissolved O2` = "oxygen",  `Water Temp` = "temperature"))|>
+  rename(NSE_normed = "fit")|>
+  filter(forecast_week <40, forecast_week >37)|>
+  filter(variable == "Greenness")|>
+  mutate(forecast_week = as_factor(forecast_week))
+
+
+ggplot(data = m2.pred, aes(x = horizon, y = NSE_normed, color = variable))+
+  geom_smooth(se=FALSE)+
+  geom_point(data = df_gam|>
+    filter(forecast_week <40, forecast_week >37)|>
+    filter(variable == "gcc_90")|>
+    mutate(forecast_week = as_factor(forecast_week)), aes(x = horizon, y = NSE_normed, color = variable))+
+  facet_wrap(.~forecast_week)+
+  xlab("Forecast Horizon (days)")+
+  ylab("Normed NSE")+
+  theme_bw()+
+  theme(legend.position  = c(0.75,0.15), legend.title = element_blank(),
+        axis.title.y = element_text(size = 18),axis.title.x = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(face = "bold"), axis.text.y = element_text(face = "bold"),
+        strip.text = element_text(face = "bold", size = 12), legend.text = element_text(size = 10, face = "bold"))+
+  guides(color=guide_legend(nrow=4))
+
+
+# m3
+summary(m3)
+
+m3.pred <- predict_gam(m3, length_out = 100, 
+                       values = list(site_id = NULL, horizon = seq(0,30, by = 1), 
+                                     forecast_week = seq(1,max(df_gam$forecast_week)), by = 1))|>
+  #left_join(df_gam|>group_by(variable, site_id, horizon, forecast_week)|>summarize(mean_nse = mean(NSE_normed,na.rm = TRUE)))
+  #mutate(variable = fct_recode(variable,`Chlorophyll-a`= "chla", Greenness = "gcc_90", Redness = "rcc_90", Evapotranspiration = "le", `Net Ecosystem Exchange` = "nee", `Dissolved O2` = "oxygen",  `Water Temp` = "temperature"))|>
+  rename(NSE_normed = "fit")|>
+  filter(forecast_week <21, forecast_week >15)|>
+  mutate(forecast_week = as_factor(forecast_week))
+
+
+ggplot(data = m3.pred, aes(x = horizon, y = NSE_normed, color = variable))+
+  geom_smooth(se=FALSE)+
+  geom_point(data = df_gam|>filter(forecast_week <21, forecast_week >15)|>mutate(forecast_week = as_factor(forecast_week)), 
+             aes(x = horizon, y = NSE_normed, color = variable))+
+  facet_grid(site_id~forecast_week)+
+  xlab("Forecast Horizon (days)")+
+  ylab("Normed NSE")+
+  theme_bw()+
+  theme(legend.position  = c(0.75,0.15), legend.title = element_blank(),
+        axis.title.y = element_text(size = 18),axis.title.x = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(face = "bold"), axis.text.y = element_text(face = "bold"),
+        strip.text = element_text(face = "bold", size = 12), legend.text = element_text(size = 10, face = "bold"))+
+  guides(color=guide_legend(nrow=4))
+
+
+# m3 with beta distribution
+summary(m3.beta)
+
+m3.beta.pred <- predict_gam(m3.beta, length_out = 100, 
+                       values = list(site_id = NULL, horizon = seq(0,30, by = 1), 
+                                     forecast_week = seq(1,max(df_gam$forecast_week)), by = 1))|>
+  #left_join(df_gam|>group_by(variable, site_id, horizon, forecast_week)|>summarize(mean_nse = mean(NSE_normed,na.rm = TRUE)))
+  #mutate(variable = fct_recode(variable,`Chlorophyll-a`= "chla", Greenness = "gcc_90", Redness = "rcc_90", Evapotranspiration = "le", `Net Ecosystem Exchange` = "nee", `Dissolved O2` = "oxygen",  `Water Temp` = "temperature"))|>
+  mutate(NSE_normed = exp(fit)/(1+exp(fit)))|> #inverse logit, which is link function
+  filter(forecast_week <21, forecast_week >15)|>
+  mutate(forecast_week = as_factor(forecast_week))
+
+
+ggplot(data = m3.beta.pred, aes(x = horizon, y = NSE_normed, color = variable))+
+  geom_smooth(se=FALSE)+
+  geom_point(data = df_gam|>filter(forecast_week <21, forecast_week >15)|>mutate(forecast_week = as_factor(forecast_week)), 
+             aes(x = horizon, y = NSE_normed, color = variable))+
+  facet_wrap(.~forecast_week)+
+  xlab("Forecast Horizon (days)")+
+  ylab("Normed NSE")+
+  theme_bw()+
+  theme(legend.position  = c(0.75,0.15), legend.title = element_blank(),
+        axis.title.y = element_text(size = 18),axis.title.x = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(face = "bold"), axis.text.y = element_text(face = "bold"),
+        strip.text = element_text(face = "bold", size = 12), legend.text = element_text(size = 10, face = "bold"))+
+  guides(color=guide_legend(nrow=4))
+
+# m3 with beta distribution and no global intercept for variable
+summary(m3.beta_noint)
+
+m3.betan.pred <- predict_gam(m3.beta_noint, length_out = 100, 
+                       values = list(site_id = NULL, horizon = seq(0,30, by = 1), 
+                                     forecast_week = seq(1,max(df_gam$forecast_week)), by = 1))|>
+  #left_join(df_gam|>group_by(variable, site_id, horizon, forecast_week)|>summarize(mean_nse = mean(NSE_normed,na.rm = TRUE)))
+  #mutate(variable = fct_recode(variable,`Chlorophyll-a`= "chla", Greenness = "gcc_90", Redness = "rcc_90", Evapotranspiration = "le", `Net Ecosystem Exchange` = "nee", `Dissolved O2` = "oxygen",  `Water Temp` = "temperature"))|>
+  mutate(NSE_normed = exp(fit)/(1+exp(fit)))|> #inverse logit, which is link function
+  filter(forecast_week <21, forecast_week >15)|>
+  mutate(forecast_week = as_factor(forecast_week))
+
+
+ggplot(data = m3.betan.pred, aes(x = horizon, y = NSE_normed, color = variable))+
+  geom_smooth(se=FALSE)+
+  geom_point(data = df_gam|>filter(forecast_week <21, forecast_week >15)|>mutate(forecast_week = as_factor(forecast_week)), 
+             aes(x = horizon, y = NSE_normed, color = variable))+
+  facet_wrap(.~forecast_week)+
+  xlab("Forecast Horizon (days)")+
+  ylab("Normed NSE")+
+  theme_bw()+
+  theme(legend.position  = c(0.75,0.15), legend.title = element_blank(),
+        axis.title.y = element_text(size = 18),axis.title.x = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(face = "bold"), axis.text.y = element_text(face = "bold"),
+        strip.text = element_text(face = "bold", size = 12), legend.text = element_text(size = 10, face = "bold"))+
+  guides(color=guide_legend(nrow=4))
+```
+Whoa, beta-distributed response makes a huge difference. failing to inclue variable intercept results in functionally exact same model fit.
+
+```{r}
+AIC(m0,m1,m2,m3,m3.beta, m3.beta_noint)
+
+```
+
+# GAM fit on full dataset
+
+Tried to fit the below model but it took over a day to run. Originally, it bombed the available memory in my system (64 gb), then I tried to discretize (which consequently removes parallel processing) and it didn't finish after a day of running. Shifting gears to running separate models for each variable. 
+
+         
+m3.beta_full <- bam(data = df_gam_full, NSE_normed ~ horizon + variable +
+          s(horizon, by = variable)+
+          s(horizon, site_id, bs = "sz", by = variable)+
+          s(forecast_week, bs= "cc", by = variable)+
+          s(forecast_week, site_id, bs = "fs", xt = list(bs = "cc"), by = variable)+
+          ti(horizon, forecast_week, by = variable),
+          family = betar,
+          discrete = TRUE,
+          #cluster = cl,
+          nthreads = 12)
+
+```{r}
+df_gam_full <- df2|>
+  ungroup()|>
+  mutate(variable = as_factor(variable),
+         site_id = as_factor(site_id))
+
+df_test <- df_gam_full|>
+  group_split(variable) %>%
+   setNames(c(paste0("df_gam_",unique(df_gam_full$variable))))
+
+list2env(df_test, envir = .GlobalEnv)
 ```
 
 
-View target observations
 ```{r}
+tic()
+#m3.beta_temp <- bam(data = df_gam_temperature,
+                    NSE_normed ~ 
+                      horizon +
+                      s(horizon)+
+                      s(horizon, by = site_id)+
+                      s(forecast_week, bs= "cc")+
+                      s(forecast_week, by = site_id, xt = list(bs = "cc"))+
+                      ti(horizon, forecast_week),
+                    family = betar,
+                    #discrete = TRUE,
+                    cluster = cl)
+toc()#60 minutes
 
-aquatic_df <- download_target("aquatics")
-beetle_df<- download_target("beetles")
+tic()
+m3.beta_temp2 <- bam(data = df_gam_temperature,
+                    NSE_normed ~ 
+                      s(horizon)+
+                      s(horizon, by = site_id)+
+                      s(forecast_week, bs= "cc")+
+                      s(forecast_week, by = site_id, xt = list(bs = "cc"))+
+                      ti(horizon, forecast_week),
+                    family = betar,
+                    #discrete = TRUE,
+                    cluster = cl)
+toc()#60 minutes
 
-beetle_t<- beetle_df|>
-  pivot_wider(names_from = "variable", values_from = "observation")|>
-  filter(abundance > 0)
+tic()
+m3.beta_temp3 <- bam(data = df_gam_temperature|>filter(site_id %in% c("ARIK", "BLUE")),
+                    NSE_normed ~ 
+                      site_id+
+                      s(horizon)+
+                      s(horizon, by = site_id)+
+                      s(forecast_week, bs= "cc")+
+                      s(forecast_week, by = site_id, xt = list(bs = "cc"))+
+                      ti(horizon, forecast_week),
+                    family = betar,
+                    #discrete = TRUE,
+                    cluster = cl)
+toc()#60 minutes
 
-ggplot(beetle_df|>mutate()|>filter(variable == "richness"), 
-       aes(x = datetime, y = observation, color = site_id))+
-  geom_line()
+m3.beta_temp.pred <- predict_gam(m3.beta_temp3, length_out = 100, 
+                       values = list(#site_id = unique(df_gam_temperature$site_id), 
+                                     site_id = c("ARIK", "BLUE"),
+                                     horizon = seq(0,30, by = 1), 
+                                     forecast_week = seq(1,max(df_gam$forecast_week)), by = 1))|>
+  #left_join(df_gam|>group_by(variable, site_id, horizon, forecast_week)|>summarize(mean_nse = mean(NSE_normed,na.rm = TRUE)))
+  #mutate(variable = fct_recode(variable,`Chlorophyll-a`= "chla", Greenness = "gcc_90", Redness = "rcc_90", Evapotranspiration = "le", `Net Ecosystem Exchange` = "nee", `Dissolved O2` = "oxygen",  `Water Temp` = "temperature"))|>
+  mutate(NSE_normed = exp(fit)/(1+exp(fit)))|> #inverse logit, which is link function
+  filter(forecast_week <10, forecast_week >4)|>
+  mutate(forecast_week = as_factor(forecast_week))|>
+  mutate(upper.se = exp(fit+1.96*se.fit)/(1+exp(fit+1.96*se.fit)),
+         lower.se = exp(fit-1.96*se.fit)/(1+exp(fit-1.96*se.fit)))
+
+ggplot(data = m3.beta_temp.pred|>filter(site_id == "BLUE"), aes(x = horizon, y = NSE_normed))+
+  geom_smooth(se=FALSE)+
+  geom_smooth(aes(x = horizon, y = upper.se),se = FALSE, color = "red")+
+  geom_smooth(aes(x = horizon, y = lower.se),se = FALSE, color = "red")+
+  geom_point(data = df_gam_temperature|>filter(site_id == "BLUE")|>filter(forecast_week <10, forecast_week >4)|>mutate(forecast_week = as_factor(forecast_week)), 
+             aes(x = horizon, y = NSE_normed))+
+  facet_wrap(.~forecast_week)+
+  xlab("Forecast Horizon (days)")+
+  ylab("Normed NSE")+
+  theme_bw()+
+  theme(legend.position  = c(0.75,0.15), legend.title = element_blank(),
+        axis.title.y = element_text(size = 18),axis.title.x = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(face = "bold"), axis.text.y = element_text(face = "bold"),
+        strip.text = element_text(face = "bold", size = 12), legend.text = element_text(size = 10, face = "bold"))+
+  guides(color=guide_legend(nrow=4))
+
+
+
+AIC(m3.beta_temp,m3.beta_temp2)
+```
+```{r}
+unique(df_gam_gcc_90$site_id)
+m3.beta_gcc <- bam(data = df_gam_gcc_90|>filter(site_id %in% c("ABBY", "BARR")),
+                    NSE_normed ~ 
+                      s(horizon)+
+                      s(horizon, by = site_id)+
+                      s(forecast_week, bs= "cc")+
+                      s(forecast_week, by = site_id, xt = list(bs = "cc"))+
+                      ti(horizon, forecast_week),
+                    family = betar,
+                    #discrete = TRUE,
+                    cluster = cl)
+toc()
+
+m3.beta_gcc2 <- bam(data = df_gam_gcc_90|>filter(site_id %in% c("ABBY", "BARR")),
+                    NSE_normed ~ 
+                     s(horizon)+
+                      s(horizon, by = forecast_week)+
+                      s(horizon, by = site_id)+
+                      s(forecast_week, bs= "cc")+
+                      s(forecast_week, by = site_id, xt = list(bs = "cc"))+
+                      ti(horizon, forecast_week, by = site_id),
+                    family = betar,
+                    #discrete = TRUE,
+                    cluster = cl)
+
+m3.beta_gcc3 <- bam(data = df_gam_gcc_90|>filter(site_id %in% c("ABBY", "BARR","DEJU", "HARV")),
+                    NSE_normed ~ 
+                      horizon + forecast_week+site_id+
+                      s(horizon, by = site_id)+
+                      s(forecast_week, bs= "cc")+
+                      s(forecast_week, by = site_id, xt = list(bs = "cc"))+
+                      ti(horizon, forecast_week, by = site_id),
+                    family = betar)
+
+m3.beta_gcc4 <- bam(data = df_gam_gcc_90|>filter(site_id %in% c("ABBY", "BARR","DEJU", "HARV")),
+                    NSE_normed ~ 
+                      forecast_week+site_id+
+                      s(horizon, by = site_id)+
+                      s(forecast_week, bs= "cc")+
+                      s(forecast_week, by = site_id, xt = list(bs = "cc"))+
+                      ti(horizon, forecast_week, by = site_id),
+                    family = betar)
+
+
+AIC(m3.beta_gcc,m3.beta_gcc2,m3.beta_gcc3,m3.beta_gcc4)
+m3.beta_gcc.pred <- predict_gam(m3.beta_gcc4, length_out = 100, 
+                       values = list(#site_id = unique(df_gam_temperature$site_id), 
+                                     site_id = c("ABBY", "BARR","DEJU", "HARV"),
+                                     horizon = seq(0,30, by = 1), 
+                                     forecast_week = seq(1,max(df_gam$forecast_week)), by = 1))|>
+  #left_join(df_gam|>group_by(variable, site_id, horizon, forecast_week)|>summarize(mean_nse = mean(NSE_normed,na.rm = TRUE)))
+  #mutate(variable = fct_recode(variable,`Chlorophyll-a`= "chla", Greenness = "gcc_90", Redness = "rcc_90", Evapotranspiration = "le", `Net Ecosystem Exchange` = "nee", `Dissolved O2` = "oxygen",  `Water Temp` = "temperature"))|>
+  mutate(NSE_normed = exp(fit)/(1+exp(fit)))|> #inverse logit, which is link function
+  filter(forecast_week <9, forecast_week >7)|>
+  mutate(forecast_week = as_factor(forecast_week))|>
+  mutate(upper.se = exp(fit+1.96*se.fit)/(1+exp(fit+1.96*se.fit)),
+         lower.se = exp(fit-1.96*se.fit)/(1+exp(fit-1.96*se.fit)))
+
+ggplot(data = m3.beta_gcc.pred|>filter(site_id == "ABBY"), aes(x = horizon, y = NSE_normed))+
+  geom_smooth(se=FALSE)+
+  geom_smooth(aes(x = horizon, y = upper.se),se = FALSE, color = "red")+
+  geom_smooth(aes(x = horizon, y = lower.se),se = FALSE, color = "red")+
+  geom_point(data = df_gam_gcc_90|>filter(site_id == "ABBY")|>filter(forecast_week <10, forecast_week >3)|>mutate(forecast_week = as_factor(forecast_week)), 
+             aes(x = horizon, y = NSE_normed))+
+  facet_wrap(.~forecast_week)+
+  xlab("Forecast Horizon (days)")+
+  ylab("Normed NSE")+
+  theme_bw()+
+  theme(legend.position  = c(0.75,0.15), legend.title = element_blank(),
+        axis.title.y = element_text(size = 18),axis.title.x = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(face = "bold"), axis.text.y = element_text(face = "bold"),
+        strip.text = element_text(face = "bold", size = 12), legend.text = element_text(size = 10, face = "bold"))+
+  guides(color=guide_legend(nrow=4))
+
+ggplot(data = m3.beta_gcc.pred, aes(x = horizon, y = NSE_normed))+
+  geom_smooth(se=FALSE)+
+  geom_smooth(aes(x = horizon, y = upper.se),se = FALSE, color = "red")+
+  geom_smooth(aes(x = horizon, y = lower.se),se = FALSE, color = "red")+
+  geom_point(data = df_gam_gcc_90|>filter(site_id %in% c("ABBY", "BARR","DEJU", "HARV"))|>filter(forecast_week <9, forecast_week >7)|>mutate(forecast_week = as_factor(forecast_week)), 
+             aes(x = horizon, y = NSE_normed))+
+  facet_wrap(.~site_id)+
+  xlab("Forecast Horizon (days)")+
+  ylab("Normed NSE")+
+  theme_bw()+
+  theme(legend.position  = c(0.75,0.15), legend.title = element_blank(),
+        axis.title.y = element_text(size = 18),axis.title.x = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(face = "bold"), axis.text.y = element_text(face = "bold"),
+        strip.text = element_text(face = "bold", size = 12), legend.text = element_text(size = 10, face = "bold"))+
+  guides(color=guide_legend(nrow=4))
+
+```
+# full fits
+```{r}
+tic()
+m3.beta_gcc3 <- bam(data = df_gam_gcc_90,
+                    NSE_normed ~ 
+                      forecast_week+site_id+
+                      s(horizon, by = site_id)+
+                      s(forecast_week, bs= "cc")+
+                      s(forecast_week, by = site_id, xt = list(bs = "cc"))+
+                      ti(horizon, forecast_week, by = site_id),
+                    family = betar,
+                    cluster = cl)
+toc() #5 hours
+
+saveRDS(m3.beta_gcc3, here("gcc_90_analysis_gam.Rds"))
+```
+
+```{r}
+tic()
+m3.beta_temp3 <- bam(data = df_gam_temperature,
+                    NSE_normed ~ 
+                      forecast_week+site_id+
+                      s(horizon, by = site_id)+
+                      s(forecast_week, bs= "cc")+
+                      s(forecast_week, by = site_id, xt = list(bs = "cc"))+
+                      ti(horizon, forecast_week, by = site_id),
+                    family = betar,
+                    cluster = cl)
+toc() #2 hours
+
+saveRDS(m3.beta_temp3, here("temp_analysis_gam.Rds"))
+```
+
+Follow model 'GS' in Pedersen et al "Hierarchical GAMs" in PeerJ
+slowly add following components:
+s(horizon, by = "var)+
+s(horizon, site, bs = "sz", by = var)+
+____________________
+s(week, bs= "cc", by = var)+ # or doy or whatever temporal component
+_____________________________________
+s(week, site, bs = "fs", xt = list(bs = "cc"), by = var)+
+______________________________
+ti(horizon, doy, by = var)
+```{r}
+cl <- makeCluster(6)
+tic()
+m3.beta_oxy3 <- bam(data = df_gam_oxygen|>filter(site_id %in% c("BLUE", "ARIK"), forecast_week < 14, forecast_week >0)|>mutate(forecast_week = as_factor(forecast_week)),
+                    NSE_normed ~ 
+                      site_id+
+                      s(horizon)+
+                      #s(horizon, by = site_id)+
+                      s(horizon, forecast_week, bs = "sz", by = site_id),
+                    
+                      #s(horizon, forecast_week, bs = "sz"),
+                      #s(forecast_week, bs= "cc", m = 2)+
+                      #s(forecast_week, site_id, bs = "fs", xt = list(bs = "tp"))+
+                      #ti(horizon, forecast_week, by = site_id),
+                    family = betar,
+                    cluster = cl)
+toc() #8 hours
+
+#saveRDS(m3.beta_oxy3, here("oxygen_analysis_gam.Rds"))
+```
+
+```{r}
+oxy_pred <- predict_gam(m3.beta_oxy3, length_out = 100, 
+                       values = list(#site_id = unique(df_gam_oxygen$site_id),
+                         site_id = c("BLUE", "ARIK"),
+                                     horizon = seq(0,30, by = 1), 
+                                     forecast_week = seq(1,max(df_gam_oxygen$forecast_week)), by = 1))|>
+  #left_join(df_gam|>group_by(variable, site_id, horizon, forecast_week)|>summarize(mean_nse = mean(NSE_normed,na.rm = TRUE)))
+  #mutate(variable = fct_recode(variable,`Chlorophyll-a`= "chla", Greenness = "gcc_90", Redness = "rcc_90", Evapotranspiration = "le", `Net Ecosystem Exchange` = "nee", `Dissolved O2` = "oxygen",  `Water Temp` = "temperature"))|>
+  mutate(NSE_normed = exp(fit)/(1+exp(fit)))|> #inverse logit, which is link function
+  #mutate(forecast_week = as_factor(forecast_week))|>
+  mutate(upper.se = exp(fit+1.96*se.fit)/(1+exp(fit+1.96*se.fit)),
+         lower.se = exp(fit-1.96*se.fit)/(1+exp(fit-1.96*se.fit)))
+
+
+ggplot(data = oxy_pred|>filter(site_id %in% c("BLUE"))|>
+         filter(forecast_week >0, forecast_week <11), aes(x = horizon, y = NSE_normed))+
+  #geom_point(color = "red")+
+  geom_smooth(se=FALSE)+
+  geom_smooth(aes(x = horizon, y = upper.se),se = FALSE, color = "red")+
+  geom_smooth(aes(x = horizon, y = lower.se),se = FALSE, color = "red")+
+  geom_point(data = df_gam_oxygen|>filter(site_id %in% c("BLUE"))|>filter(forecast_week >0, forecast_week <11)|>mutate(forecast_week = as_factor(forecast_week)), 
+             aes(x = horizon, y = NSE_normed))+
+   #geom_smooth(data = df_gam_oxygen|>filter(site_id %in% c("BLUE"))|>filter(forecast_week >0, forecast_week <11)|>mutate(forecast_week = as_factor(forecast_week)), 
+    #         aes(x = horizon, y = NSE_normed))+
+  facet_wrap(.~forecast_week)+
+  xlab("Forecast Horizon (days)")+
+  ylab("Normed NSE")+
+  theme_bw()+
+  theme(legend.position  = c(0.75,0.15), legend.title = element_blank(),
+        axis.title.y = element_text(size = 18),axis.title.x = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(face = "bold"), axis.text.y = element_text(face = "bold"),
+        strip.text = element_text(face = "bold", size = 12), legend.text = element_text(size = 10, face = "bold"))+
+  guides(color=guide_legend(nrow=4))
+
+ggplot(data = oxy_pred|>filter(site_id %in% c("ARIK"))|>
+         filter(forecast_week >0, forecast_week <11), aes(x = horizon, y = NSE_normed))+
+  #geom_point(color = "red")+
+  geom_smooth(se=FALSE)+
+  geom_smooth(aes(x = horizon, y = upper.se),se = FALSE, color = "red")+
+  geom_smooth(aes(x = horizon, y = lower.se),se = FALSE, color = "red")+
+  geom_point(data = df_gam_oxygen|>filter(site_id %in% c("ARIK"))|>filter(forecast_week >0, forecast_week <11)|>mutate(forecast_week = as_factor(forecast_week)), 
+             aes(x = horizon, y = NSE_normed))+
+   #geom_smooth(data = df_gam_oxygen|>filter(site_id %in% c("BLUE"))|>filter(forecast_week >0, forecast_week <11)|>mutate(forecast_week = as_factor(forecast_week)), 
+    #         aes(x = horizon, y = NSE_normed))+
+  facet_wrap(.~forecast_week)+
+  xlab("Forecast Horizon (days)")+
+  ylab("Normed NSE")+
+  theme_bw()+
+  theme(legend.position  = c(0.75,0.15), legend.title = element_blank(),
+        axis.title.y = element_text(size = 18),axis.title.x = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(face = "bold"), axis.text.y = element_text(face = "bold"),
+        strip.text = element_text(face = "bold", size = 12), legend.text = element_text(size = 10, face = "bold"))+
+  guides(color=guide_legend(nrow=4))
 
 ```
 
 
 ```{r}
-library(mgcv)
-nee_df <- df2|>ungroup()|>filter(variable == "nee", is.numeric(R2), R2 >=0)|>
-  mutate(forecast_month = as_factor(forecast_month),
-         site_id = as_factor(site_id))|>
-  mutate(month_site = interaction(forecast_month, site_id))
+temp_pred <- predict_gam(m3.beta_temp3, length_out = 100, 
+                       values = list(site_id = unique(df_gam_temperature$site_id),
+                                     horizon = seq(0,30, by = 1), 
+                                     forecast_week = seq(1,max(df_gam_temperature$forecast_week)), by = 1))|>
+  #left_join(df_gam|>group_by(variable, site_id, horizon, forecast_week)|>summarize(mean_nse = mean(NSE_normed,na.rm = TRUE)))
+  #mutate(variable = fct_recode(variable,`Chlorophyll-a`= "chla", Greenness = "gcc_90", Redness = "rcc_90", Evapotranspiration = "le", `Net Ecosystem Exchange` = "nee", `Dissolved O2` = "oxygen",  `Water Temp` = "temperature"))|>
+  mutate(NSE_normed = exp(fit)/(1+exp(fit)))|> #inverse logit, which is link function
+  #mutate(forecast_week = as_factor(forecast_week))|>
+  mutate(upper.se = exp(fit+1.96*se.fit)/(1+exp(fit+1.96*se.fit)),
+         lower.se = exp(fit-1.96*se.fit)/(1+exp(fit-1.96*se.fit)))
 
 
-m1 <- gam(R2 ~ s(horizon)+
-            s(horizon, by = month_site), 
-          data = nee_df)
+ggplot(data = temp_pred|>filter(site_id %in% c("ARIK"))|>
+         filter(forecast_week >30, forecast_week <43), aes(x = horizon, y = NSE_normed))+
+  geom_smooth(se=FALSE)+
+  geom_smooth(aes(x = horizon, y = upper.se),se = FALSE, color = "red")+
+  geom_smooth(aes(x = horizon, y = lower.se),se = FALSE, color = "red")+
+  geom_point(data = df_gam_temperature|>filter(site_id %in% c("ARIK"))|>filter(forecast_week >30, forecast_week <43)|>mutate(forecast_week = as_factor(forecast_week)), 
+             aes(x = horizon, y = NSE_normed))+
+  facet_wrap(.~forecast_week)+
+  xlab("Forecast Horizon (days)")+
+  ylab("Normed NSE")+
+  theme_bw()+
+  theme(legend.position  = c(0.75,0.15), legend.title = element_blank(),
+        axis.title.y = element_text(size = 18),axis.title.x = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(face = "bold"), axis.text.y = element_text(face = "bold"),
+        strip.text = element_text(face = "bold", size = 12), legend.text = element_text(size = 10, face = "bold"))+
+  guides(color=guide_legend(nrow=4))
+
+```
 
 
+
+How can we collapse the variation in shape? 
+First derivative - Average slope
+How does the average slope vary temporally and spatially? 
+Second derivative - Wiggliness
+- variation in forecast shape
+
+
+```{r}
+temp_pred_global <- predict_gam(m3.beta_temp3, length_out = 100, 
+                       values = list(site_id = NULL,
+                                     horizon = seq(0,30, by = 1), 
+                                     forecast_week = NULL))|>
+  mutate(NSE_normed = exp(fit)/(1+exp(fit)))|> #inverse logit, which is link function
+  mutate(upper.se = exp(fit+1.96*se.fit)/(1+exp(fit+1.96*se.fit)),
+         lower.se = exp(fit-1.96*se.fit)/(1+exp(fit-1.96*se.fit)))
+
+ggplot(data = temp_pred_global, aes(x = horizon, y = NSE_normed))+
+  geom_smooth(se=FALSE)+
+  geom_smooth(aes(x = horizon, y = upper.se),se = FALSE, color = "red")+
+  geom_smooth(aes(x = horizon, y = lower.se),se = FALSE, color = "red")+
+  geom_point(data = df_gam_temperature|>mutate(NSE_logit = log(NSE_normed/1-NSE_normed))|>
+               group_by(horizon)|>
+               summarize(NSE_mean = mean(NSE_logit, na.rm = TRUE)), 
+             aes(x = horizon, y = NSE_normed))+
+  xlab("Forecast Horizon (days)")+
+  ylab("Normed NSE")+
+  scale_y_continuous(limits = c(0,1))+
+  theme_bw()+
+  theme(legend.position  = c(0.75,0.15), legend.title = element_blank(),
+        axis.title.y = element_text(size = 18),axis.title.x = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(face = "bold"), axis.text.y = element_text(face = "bold"),
+        strip.text = element_text(face = "bold", size = 12), legend.text = element_text(size = 10, face = "bold"))+
+  guides(color=guide_legend(nrow=4))
+blah <- df_gam_temperature|>mutate(NSE_logit = log(NSE_normed/1-NSE_normed))|>
+               group_by(horizon)|>
+               summarize(NSE_mean = mean(NSE_logit, na.rm = TRUE))
 ```

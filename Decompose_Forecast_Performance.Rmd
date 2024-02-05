@@ -1,0 +1,279 @@
+---
+title: "Untitled"
+output: html_document
+date: "2024-01-22"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(here)
+library(arrow)
+library(neon4cast)
+library(yardstick)
+library(mgcv)
+library(tidymv)
+library(tictoc)
+source(here("download_target.R"))
+```
+
+
+```{r}
+
+forecasts <- read_parquet(here("Summarized_Forecasts/randfor.parquet"))
+
+targets_vec <- c("aquatics", "terrestrial_daily", "beetles", "ticks", "phenology")
+
+tar_hist <- map(targets_vec, ~download_target(.))|>
+  list_rbind()
+
+hist_mean_obs <- tar_hist|>
+  filter(datetime < as_date ("2023-01-01"))|>
+  group_by(variable, site_id)|>
+  summarize(mean_historical_observation = mean(observation, na.rm = TRUE),
+            iq_range = quantile(observation,0.75, na.rm = TRUE)-quantile(observation, 0.25, na.rm = TRUE))
+
+```
+
+```{r calculate error metric}
+forecasts2 <- forecasts|>
+  left_join(tar_hist)|>
+  left_join(hist_mean_obs)
+
+
+df2 <- forecasts2|>
+  filter(!(variable %in% c("abundance", "amblyomma_americanum", "richness")))|>
+  group_by(variable)|>
+  mutate(forecast_month = month(reference_datetime),
+         forecast_week = week(reference_datetime))|>
+  filter(horizon >= 0)|>
+  relocate(forecast_week)|>
+  mutate(modobs_diff = observation-mean,
+         modmean_diff = observation - mean_historical_observation)|>
+  group_by(variable, reference_datetime, site_id)|>
+  mutate(initial_obs = first(observation))|>
+  group_by(variable, horizon, site_id, forecast_week)|>
+  summarize(mean_hist_obs = mean(mean_historical_observation), #simplifies summarisation - same value being averaged so nothing changed
+            N_non_na_obs = sum(!is.na(modobs_diff)),
+            randfor_rmse = sqrt(sum((modobs_diff)^2, na.rm = TRUE)/n()),
+            randfor_rmse2 = sqrt(sum((modobs_diff)^2, na.rm = TRUE)/N_non_na_obs), #test with non-NA
+            randfor_rmse_normed = randfor_rmse/mean_hist_obs,
+            randfor_rmse_normed2 = randfor_rmse2/mean_hist_obs,
+            #randfor_rmse_normed3 = randfor_rmse2/iq_range, 
+            persistence_rmse = sqrt(sum((initial_obs)^2, na.rm = TRUE))/n(), #don't know if n(0 correctly counting NAs)
+            persistence_rmse_normed = persistence_rmse/mean_hist_obs,
+            forecast_skill = 1 - (randfor_rmse_normed/persistence_rmse_normed),
+            R2_num = sum((modobs_diff)^2, na.rm = TRUE),
+            R2_denom = sum((modmean_diff)^2, na.rm = TRUE),
+            R2 = 1-(R2_num/R2_denom), # this is also NSE 
+            NSE_normed = 1/(2-R2)
+            )
+
+```
+
+# GAM setup
+
+```{r}
+df_gam <- df2|>
+  ungroup()|>
+  filter(variable %in% c("temperature", "gcc_90"), site_id %in% c("ARIK", "BARR"))|>
+  mutate(variable = as_factor(variable),
+         site_id = as_factor(site_id))
+
+df_gam_full <- df2|>
+  ungroup()|>
+  mutate(variable = as_factor(variable),
+         site_id = as_factor(site_id))
+
+df_test <- df_gam_full|>
+  group_split(variable) %>%
+   setNames(c(paste0("df_gam_",unique(df_gam_full$variable))))
+
+list2env(df_test, envir = .GlobalEnv)
+
+```
+
+```{r}
+cl <- makeCluster(6)
+tic()
+m3.beta_oxy3 <- bam(data = df_gam_oxygen|>filter(site_id %in% c("BLUE", "ARIK"), forecast_week < 14, forecast_week >0)|>mutate(forecast_week = as_factor(forecast_week)),
+                    NSE_normed ~ 
+                      site_id+
+                      s(horizon)+
+                      #s(horizon, by = site_id)+
+                      s(horizon, forecast_week, bs = "sz", by = site_id),
+                    
+                      #s(horizon, forecast_week, bs = "sz"),
+                      #s(forecast_week, bs= "cc", m = 2)+
+                      #s(forecast_week, site_id, bs = "fs", xt = list(bs = "tp"))+
+                      #ti(horizon, forecast_week, by = site_id),
+                    family = betar,
+                    cluster = cl)
+toc() # 4 minutes
+
+```
+# Oxygen tests
+```{r}
+cl <- makeCluster(6)
+tic()
+m3.beta_oxy2 <- bam(data = df_gam_oxygen|>filter(site_id %in% c("BLUE", "ARIK"), forecast_week < 14, forecast_week >0)|>mutate(forecast_week = as_factor(forecast_week)),
+                    NSE_normed ~ 
+                      site_id+forecast_week+
+                      s(horizon)+
+                      #s(horizon, by = site_id)+
+                      s(horizon, forecast_week, bs = "sz", by = site_id),
+                    
+                      #s(horizon, forecast_week, bs = "sz"),
+                      #s(forecast_week, bs= "cc", m = 2)+
+                      #s(forecast_week, site_id, bs = "fs", xt = list(bs = "tp"))+
+                      #ti(horizon, forecast_week, by = site_id),
+                    family = betar,
+                    cluster = cl)
+toc() # 4 minutes
+
+```
+
+```{r}
+oxy_pred <- predict_gam(m3.beta_oxy3, length_out = 100, 
+                       values = list(#site_id = unique(df_gam_oxygen$site_id),
+                         site_id = c("BLUE", "ARIK"),
+                                     horizon = seq(0,30, by = 1), 
+                                     forecast_week = seq(1,max(df_gam_oxygen$forecast_week)), by = 1))|>
+  #left_join(df_gam|>group_by(variable, site_id, horizon, forecast_week)|>summarize(mean_nse = mean(NSE_normed,na.rm = TRUE)))
+  #mutate(variable = fct_recode(variable,`Chlorophyll-a`= "chla", Greenness = "gcc_90", Redness = "rcc_90", Evapotranspiration = "le", `Net Ecosystem Exchange` = "nee", `Dissolved O2` = "oxygen",  `Water Temp` = "temperature"))|>
+  mutate(NSE_normed = exp(fit)/(1+exp(fit)))|> #inverse logit, which is link function
+  #mutate(forecast_week = as_factor(forecast_week))|>
+  mutate(upper.se = exp(fit+1.96*se.fit)/(1+exp(fit+1.96*se.fit)),
+         lower.se = exp(fit-1.96*se.fit)/(1+exp(fit-1.96*se.fit)))
+
+
+ggplot(data = oxy_pred|>filter(site_id %in% c("BLUE"))|>
+         filter(forecast_week >0, forecast_week <11), aes(x = horizon, y = NSE_normed))+
+  #geom_point(color = "red")+
+  geom_smooth(se=FALSE)+
+  geom_smooth(aes(x = horizon, y = upper.se),se = FALSE, color = "red")+
+  geom_smooth(aes(x = horizon, y = lower.se),se = FALSE, color = "red")+
+  geom_point(data = df_gam_oxygen|>filter(site_id %in% c("BLUE"))|>filter(forecast_week >0, forecast_week <11)|>mutate(forecast_week = as_factor(forecast_week)), 
+             aes(x = horizon, y = NSE_normed))+
+   #geom_smooth(data = df_gam_oxygen|>filter(site_id %in% c("BLUE"))|>filter(forecast_week >0, forecast_week <11)|>mutate(forecast_week = as_factor(forecast_week)), 
+    #         aes(x = horizon, y = NSE_normed))+
+  facet_wrap(.~forecast_week)+
+  xlab("Forecast Horizon (days)")+
+  ylab("Normed NSE")+
+  theme_bw()+
+  theme(legend.position  = c(0.75,0.15), legend.title = element_blank(),
+        axis.title.y = element_text(size = 18),axis.title.x = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(face = "bold"), axis.text.y = element_text(face = "bold"),
+        strip.text = element_text(face = "bold", size = 12), legend.text = element_text(size = 10, face = "bold"))+
+  guides(color=guide_legend(nrow=4))
+
+ggplot(data = oxy_pred|>filter(site_id %in% c("ARIK"))|>
+         filter(forecast_week >0, forecast_week <11), aes(x = horizon, y = NSE_normed))+
+  #geom_point(color = "red")+
+  geom_smooth(se=FALSE)+
+  geom_smooth(aes(x = horizon, y = upper.se),se = FALSE, color = "red")+
+  geom_smooth(aes(x = horizon, y = lower.se),se = FALSE, color = "red")+
+  geom_point(data = df_gam_oxygen|>filter(site_id %in% c("ARIK"))|>filter(forecast_week >0, forecast_week <11, horizon <31)|>mutate(forecast_week = as_factor(forecast_week)), 
+             aes(x = horizon, y = NSE_normed))+
+   #geom_smooth(data = df_gam_oxygen|>filter(site_id %in% c("BLUE"))|>filter(forecast_week >0, forecast_week <11)|>mutate(forecast_week = as_factor(forecast_week)), 
+    #         aes(x = horizon, y = NSE_normed))+
+  facet_wrap(.~forecast_week)+
+  xlab("Forecast Horizon (days)")+
+  ylab("Normed NSE")+
+  theme_bw()+
+  theme(legend.position  = c(0.75,0.15), legend.title = element_blank(),
+        axis.title.y = element_text(size = 18),axis.title.x = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(face = "bold"), axis.text.y = element_text(face = "bold"),
+        strip.text = element_text(face = "bold", size = 12), legend.text = element_text(size = 10, face = "bold"))+
+  guides(color=guide_legend(nrow=4))
+
+```
+# Temperature tests
+
+```{r}
+cl <- makeCluster(6)
+tic()
+m3.beta_temp <- bam(data = df_gam_temperature|>filter(site_id %in% c("BLUE", "ARIK"), forecast_week < 14, forecast_week >0)|>mutate(forecast_week = as_factor(forecast_week)),
+                    NSE_normed ~ 
+                      site_id+
+                      s(horizon)+
+                      #s(horizon, by = site_id)+
+                      s(horizon, forecast_week, bs = "sz", by = site_id),
+                    
+                      #s(horizon, forecast_week, bs = "sz"),
+                      #s(forecast_week, bs= "cc", m = 2)+
+                      #s(forecast_week, site_id, bs = "fs", xt = list(bs = "tp"))+
+                      #ti(horizon, forecast_week, by = site_id),
+                    family = betar,
+                    cluster = cl)
+toc() # 20 minutes
+
+```
+
+```{r}
+temp_pred <- predict_gam(m3.beta_temp, length_out = 100, 
+                       values = list(#site_id = unique(df_gam_oxygen$site_id),
+                         site_id = c("BLUE", "ARIK"),
+                                     horizon = seq(0,30, by = 1), 
+                                     forecast_week = seq(1,max(df_gam_oxygen$forecast_week)), by = 1))|>
+  #left_join(df_gam|>group_by(variable, site_id, horizon, forecast_week)|>summarize(mean_nse = mean(NSE_normed,na.rm = TRUE)))
+  #mutate(variable = fct_recode(variable,`Chlorophyll-a`= "chla", Greenness = "gcc_90", Redness = "rcc_90", Evapotranspiration = "le", `Net Ecosystem Exchange` = "nee", `Dissolved O2` = "oxygen",  `Water Temp` = "temperature"))|>
+  mutate(NSE_normed = exp(fit)/(1+exp(fit)))|> #inverse logit, which is link function
+  #mutate(forecast_week = as_factor(forecast_week))|>
+  mutate(upper.se = exp(fit+1.96*se.fit)/(1+exp(fit+1.96*se.fit)),
+         lower.se = exp(fit-1.96*se.fit)/(1+exp(fit-1.96*se.fit)))
+
+
+ggplot(data = temp_pred|>filter(site_id %in% c("BLUE"))|>
+         filter(forecast_week >0, forecast_week <11), aes(x = horizon, y = NSE_normed))+
+  #geom_point(color = "red")+
+  geom_smooth(se=FALSE)+
+  geom_smooth(aes(x = horizon, y = upper.se),se = FALSE, color = "red")+
+  geom_smooth(aes(x = horizon, y = lower.se),se = FALSE, color = "red")+
+  geom_point(data = df_gam_temperature|>filter(site_id %in% c("BLUE"))|>filter(forecast_week >0, forecast_week <11)|>mutate(forecast_week = as_factor(forecast_week)), 
+             aes(x = horizon, y = NSE_normed))+
+   #geom_smooth(data = df_gam_oxygen|>filter(site_id %in% c("BLUE"))|>filter(forecast_week >0, forecast_week <11)|>mutate(forecast_week = as_factor(forecast_week)), 
+    #         aes(x = horizon, y = NSE_normed))+
+  facet_wrap(.~forecast_week)+
+  xlab("Forecast Horizon (days)")+
+  ylab("Normed NSE")+
+  theme_bw()+
+  theme(legend.position  = c(0.75,0.15), legend.title = element_blank(),
+        axis.title.y = element_text(size = 18),axis.title.x = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(face = "bold"), axis.text.y = element_text(face = "bold"),
+        strip.text = element_text(face = "bold", size = 12), legend.text = element_text(size = 10, face = "bold"))+
+  guides(color=guide_legend(nrow=4))
+
+ggplot(data = temp_pred|>filter(site_id %in% c("ARIK"))|>
+         filter(forecast_week >0, forecast_week <11), aes(x = horizon, y = NSE_normed))+
+  #geom_point(color = "red")+
+  geom_smooth(se=FALSE)+
+  geom_smooth(aes(x = horizon, y = upper.se),se = FALSE, color = "red")+
+  geom_smooth(aes(x = horizon, y = lower.se),se = FALSE, color = "red")+
+  geom_point(data = df_gam_temperature|>filter(site_id %in% c("ARIK"))|>filter(forecast_week >0, forecast_week <11)|>mutate(forecast_week = as_factor(forecast_week)), 
+             aes(x = horizon, y = NSE_normed))+
+   #geom_smooth(data = df_gam_oxygen|>filter(site_id %in% c("BLUE"))|>filter(forecast_week >0, forecast_week <11)|>mutate(forecast_week = as_factor(forecast_week)), 
+    #         aes(x = horizon, y = NSE_normed))+
+  facet_wrap(.~forecast_week)+
+  xlab("Forecast Horizon (days)")+
+  ylab("Normed NSE")+
+  theme_bw()+
+  theme(legend.position  = c(0.75,0.15), legend.title = element_blank(),
+        axis.title.y = element_text(size = 18),axis.title.x = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(face = "bold"), axis.text.y = element_text(face = "bold"),
+        strip.text = element_text(face = "bold", size = 12), legend.text = element_text(size = 10, face = "bold"))+
+  guides(color=guide_legend(nrow=4))
+
+```
+
+
+#Calculate functional shape characteristics
+## Estimate first derivative
+
+## Pull e.d.f per curve or calculate second derivative (might need to be squared)
+
+## Calculate accuracy at different time points
+This should just be pulling fit at different time points
+
+
+# 
