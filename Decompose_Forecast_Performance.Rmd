@@ -14,6 +14,7 @@ library(yardstick)
 library(mgcv)
 library(tidymv)
 library(tictoc)
+library(doParallel)
 source(here("download_target.R"))
 ```
 
@@ -94,7 +95,7 @@ list2env(df_test, envir = .GlobalEnv)
 ```
 
 ```{r}
-cl <- makeCluster(6)
+cl <- makeCluster(3)
 tic()
 m3.beta_oxy3 <- bam(data = df_gam_oxygen|>filter(site_id %in% c("BLUE", "ARIK"), forecast_week < 14, forecast_week >0)|>mutate(forecast_week = as_factor(forecast_week)),
                     NSE_normed ~ 
@@ -114,7 +115,7 @@ toc() # 4 minutes
 ```
 # Oxygen tests
 ```{r}
-cl <- makeCluster(6)
+cl <- makeCluster(3)
 tic()
 m3.beta_oxy2 <- bam(data = df_gam_oxygen|>filter(site_id %in% c("BLUE", "ARIK"), forecast_week < 14, forecast_week >0)|>mutate(forecast_week = as_factor(forecast_week)),
                     NSE_normed ~ 
@@ -191,7 +192,7 @@ ggplot(data = oxy_pred|>filter(site_id %in% c("ARIK"))|>
 # Temperature tests
 
 ```{r}
-cl <- makeCluster(6)
+cl <- makeCluster(3)
 tic()
 m3.beta_temp <- bam(data = df_gam_temperature|>filter(site_id %in% c("BLUE", "ARIK"), forecast_week < 14, forecast_week >0)|>mutate(forecast_week = as_factor(forecast_week)),
                     NSE_normed ~ 
@@ -269,6 +270,49 @@ ggplot(data = temp_pred|>filter(site_id %in% c("ARIK"))|>
 
 #Calculate functional shape characteristics
 ## Estimate first derivative
+
+```{r}
+temp_derivs<-temp_pred|>
+  group_by(site_id, forecast_week)|>
+  mutate(NSE_diff = NSE_normed-lag(NSE_normed),
+         NSE_diff2 = NSE_diff-lag(NSE_diff))
+
+ggplot(data = temp_derivs|>filter(site_id %in% c("ARIK"))|>
+         filter(forecast_week >0, forecast_week <11), aes(x = horizon, y = NSE_diff))+
+  geom_smooth(se=FALSE)+  facet_wrap(.~forecast_week)+
+  xlab("Forecast Horizon (days)")+
+  ylab("Normed NSE")+
+  theme_bw()+
+  theme(legend.position  = c(0.75,0.15), legend.title = element_blank(),
+        axis.title.y = element_text(size = 18),axis.title.x = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(face = "bold"), axis.text.y = element_text(face = "bold"),
+        strip.text = element_text(face = "bold", size = 12), legend.text = element_text(size = 10, face = "bold"))+
+  guides(color=guide_legend(nrow=4))
+
+
+ggplot(data = temp_derivs|>filter(site_id %in% c("BLUE"))|>
+         filter(forecast_week >0, forecast_week <11), aes(x = horizon, y = NSE_diff))+
+  geom_smooth(se=FALSE)+  facet_wrap(.~forecast_week)+
+  xlab("Forecast Horizon (days)")+
+  ylab("Normed NSE")+
+  theme_bw()+
+  theme(legend.position  = c(0.75,0.15), legend.title = element_blank(),
+        axis.title.y = element_text(size = 18),axis.title.x = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(face = "bold"), axis.text.y = element_text(face = "bold"),
+        strip.text = element_text(face = "bold", size = 12), legend.text = element_text(size = 10, face = "bold"))+
+  guides(color=guide_legend(nrow=4))
+
+
+deriv_summaries <- temp_derivs|>
+  group_by(site_id, forecast_week)|>
+  summarize(avg_1st_deriv = mean(NSE_diff, na.rm = TRUE),
+            avg_2nd_deriv = mean(NSE_diff2, na.rm = TRUE),
+            sum_2nd_deriv = sum(NSE_diff2, na.rm = TRUE))|>
+  filter(!is.na(avg_1st_deriv))
+
+deriv_summaries2<-deriv_summaries|>
+  group_by(site_id)
+```
 
 ## Pull e.d.f per curve or calculate second derivative (might need to be squared)
 
