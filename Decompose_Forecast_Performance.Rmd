@@ -85,7 +85,13 @@ df_gam <- df2|>
 df_gam_full <- df2|>
   ungroup()|>
   mutate(variable = as_factor(variable),
-         site_id = as_factor(site_id))
+         site_id = as_factor(site_id))|>
+  mutate(variable = case_when(variable == "gcc_90" ~ "gcc90",
+                              variable == "rcc_90" ~ "rcc90",
+                              .default = variable))
+  
+  
+  
 
 df_test <- df_gam_full|>
   group_split(variable) %>%
@@ -185,39 +191,164 @@ ggplot(data = oxy_pred|>
   guides(color=guide_legend(nrow=4))
 ```
 
-```{r faster to loop?}
+# Try looping
+```{r check single site and week GAM}
 
-df_gam_oxygen_nested <- df_gam_oxygen|>
-  filter(site_id %in% c("BLUE", "ARIK"), forecast_week < 3, forecast_week >0)|>
-  mutate(forecast_week = as_factor(forecast_week))|>
-  nest_by(forecast_week, site_id)|>
+#Temperature 
+m3.beta_temp1 <- gam(data = df_gam_temperature|>filter(site_id == "ARIK", forecast_week == 14)|>
+                      mutate(forecast_week = as_factor(forecast_week)),
+                    NSE_normed ~ horizon + s(horizon, k = 5), 
+                    family = betar)
+
+
+temp_pred <- predict_gam(m3.beta_temp1, length_out = 100, 
+                       values = list(horizon = seq(0,33, by = 1)))|>
+  mutate(NSE_normed = exp(fit)/(1+exp(fit)))|> #inverse logit, which is link function
+  mutate(upper.se = exp(fit+1.96*se.fit)/(1+exp(fit+1.96*se.fit)),
+         lower.se = exp(fit-1.96*se.fit)/(1+exp(fit-1.96*se.fit)))
+
+ggplot(data = temp_pred, aes(x = horizon, y = NSE_normed))+
+  geom_smooth(se=FALSE)+
+  geom_smooth(aes(x = horizon, y = upper.se),se = FALSE, color = "red")+
+  geom_smooth(aes(x = horizon, y = lower.se),se = FALSE, color = "red")+
+  geom_point(data = df_gam_temperature|>filter(site_id == "ARIK", forecast_week == 14)|>
+                      mutate(forecast_week = as_factor(forecast_week)), 
+             aes(x = horizon, y = NSE_normed))+
+  xlab("Forecast Horizon (days)")+
+  ylab("Normed NSE")+
+  theme_bw()+
+  theme(legend.position  = c(0.75,0.15), legend.title = element_blank(),
+        axis.title.y = element_text(size = 18),axis.title.x = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(face = "bold"), axis.text.y = element_text(face = "bold"),
+        strip.text = element_text(face = "bold", size = 12), legend.text = element_text(size = 10, face = "bold"))+
+  guides(color=guide_legend(nrow=4))
+
+#Oxygen
+
+m3.beta_oxy1 <- gam(data = df_gam_oxygen|>filter(site_id == "ARIK", forecast_week == 1)|>
+                      mutate(forecast_week = as_factor(forecast_week)),
+                    NSE_normed ~ s(horizon, k = 5), 
+                    family = betar)
+
+blah <- list(m3.beta_oxy1)
+
+
+oxy_pred <- predict_gam(m3.beta_oxy1, length_out = 100, 
+                       values = list(horizon = seq(0,33, by = 1)))|>
+  mutate(NSE_normed = exp(fit)/(1+exp(fit)))|> #inverse logit, which is link function
+  mutate(upper.se = exp(fit+1.96*se.fit)/(1+exp(fit+1.96*se.fit)),
+         lower.se = exp(fit-1.96*se.fit)/(1+exp(fit-1.96*se.fit)))
+
+ggplot(data = oxy_pred, aes(x = horizon, y = NSE_normed))+
+  geom_smooth(se=FALSE)+
+  geom_smooth(aes(x = horizon, y = upper.se),se = FALSE, color = "red")+
+  geom_smooth(aes(x = horizon, y = lower.se),se = FALSE, color = "red")+
+  geom_point(data = df_gam_oxygen|>filter(site_id == "ARIK", forecast_week == 1)|>
+                      mutate(forecast_week = as_factor(forecast_week)), 
+             aes(x = horizon, y = NSE_normed))+
+  xlab("Forecast Horizon (days)")+
+  ylab("Normed NSE")+
+  theme_bw()+
+  theme(legend.position  = c(0.75,0.15), legend.title = element_blank(),
+        axis.title.y = element_text(size = 18),axis.title.x = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(face = "bold"), axis.text.y = element_text(face = "bold"),
+        strip.text = element_text(face = "bold", size = 12), legend.text = element_text(size = 10, face = "bold"))+
+  guides(color=guide_legend(nrow=4))
+
+
+
+```
+
+```{r loops}
+
+df_gam_nested <- df_gam_full|>
+  #filter(site_id %in% c("BLUE", "ARIK"), forecast_week < 42, forecast_week >0)|>
+  select(variable,site_id, horizon,forecast_week,NSE_normed, N_non_na_obs)|>
+  filter(N_non_na_obs>2)|>
+  group_by(variable,site_id, forecast_week)|>
+  mutate(weekly_points = n())|>
+  filter(weekly_points>20)|> #reduced dataset by ~15 %
   ungroup()|>
-  mutate(batch_name = str_c(site_id, "_",forecast_week),
+  mutate(forecast_week = as_factor(forecast_week))|>
+  nest_by(variable,forecast_week, site_id)|>
+  ungroup()|>
+  mutate(batch_name = str_c(variable, "_",site_id, "_",forecast_week),
          batch_number = row_number())
 
-batch_names <- df_gam_oxygen_nested|>pull(batch_name)
+batch_names <- df_gam_nested|>pull(batch_name)
 #set up options and parallelization
 cl <- makePSOCKcluster(5) 
 registerDoSNOW(cl)
-pb <- txtProgressBar(max = nrow(df_gam_oxygen_nested), style = 3)
+pb <- txtProgressBar(max = nrow(df_gam_nested), style = 3)
 progress <- function(n) setTxtProgressBar(pb, n)
 opts <- list(progress = progress)
 
 # Loop
-oxy_gams <- foreach(i = 1:nrow(df_gam_oxygen_nested), .combine = 'c', .options.snow = opts, 
-        .packages = c("tidyverse", "mgcv"), .inorder = TRUE, .final = function(x) setNames(x, batch_names)) %dopar% {
+tic()
+gam_preds <- foreach(i = 1:nrow(df_gam_nested), .combine = 'c', .options.snow = opts, 
+        .packages = c("tidyverse", "mgcv","tidymv"), .inorder = TRUE, .final = function(x) setNames(x, batch_names)) %dopar% {
           
-          gam_data <- df_gam_oxygen_nested|>filter(batch_number == i)|>unnest(data)
+          #subset data
+          gam_data <- df_gam_nested|>filter(batch_number == i)|>unnest(data)
           
+          #fit gam
          gam_obj <- gam(data = gam_data, 
-    NSE_normed ~ site_id+forecast_week+
-                      s(horizon, forecast_week, bs = "sz", by = site_id),
+    NSE_normed ~ s(horizon),
     family = betar)
-          
-          list(gam_obj)
+         
+         #extract predictions
+         preds <- predict_gam(gam_obj, length_out = 100, 
+                       values = list(horizon = seq(0,33, by = 1)))|>
+  mutate(NSE_normed = exp(fit)/(1+exp(fit)))|> #inverse logit, which is link function
+  mutate(upper.se = exp(fit+1.96*se.fit)/(1+exp(fit+1.96*se.fit)),
+         lower.se = exp(fit-1.96*se.fit)/(1+exp(fit-1.96*se.fit)))|>
+           mutate(NSE_diff = NSE_normed-lag(NSE_normed),
+                  NSE_diff2 = NSE_diff-lag(NSE_diff))
+    
+         #extract edf
+         edf <- summary(gam_obj)$edf
+         
+         #bundle up into list
+          list(list(#fitted_model = gam_obj, #so short to run, don't need to be saving the model fits
+                    edf = edf, 
+                    prediction_df = preds))
         }     
+stopCluster(cl)
+toc() # 1.5 minute to run all
+
+```
+
+```{r extract info from GAM list}
 
 
+edfs_df <- gam_preds|>
+  map(~pluck(., "edf")|>as_tibble_col(column_name = "edf"))|>
+  list_rbind(names_to = "id")
+
+preds_df <- gam_preds|>
+  map(~pluck(., "prediction_df"))|>
+  list_rbind(names_to = "id")
+
+avg_2deriv_df <- preds_df|>
+  group_by(id)|>summarize(avg_1der = mean(NSE_diff, na.rm = TRUE),
+                          sum_2deriv = sum(abs(NSE_diff2), na.rm = TRUE),
+                          sum_1deriv = sum(abs(NSE_diff), na.rm = TRUE))
+
+blah<-edfs_df|>left_join(avg_2deriv_df)|>
+  separate_wider_delim(id, "_", names = c("variable", "site","forecast_week"), too_many = "debug")|>
+  mutate(forecast_week = as.numeric(forecast_week))
+
+ggplot(blah, aes(x = edf, y = sum_1deriv))+
+  geom_point()+
+  geom_smooth()
+
+ggplot(blah, aes(x = avg_1der))+
+  geom_density()+
+  facet_wrap(.~variable)
+
+ggplot(blah|>filter(variable == "temperature")|>filter(site == "ARIK"), 
+       aes(x = forecast_week, y = avg_1der))+
+  geom_point()
 ```
 
 ```{r}
@@ -278,9 +409,9 @@ ggplot(data = oxy_pred|>filter(site_id %in% c("ARIK"))|>
 # Temperature tests
 
 ```{r}
-cl <- makeCluster(10)
+cl <- makeCluster(4)
 tic()
-m3.beta_temp <- bam(data = df_gam_temperature|>filter(site_id %in% c("BLUE", "ARIK"), forecast_week < 14, forecast_week >0)|>mutate(forecast_week = as_factor(forecast_week)),
+m3.beta_temp <- bam(data = df_gam_temperature|>filter(site_id %in% c("BLUE", "ARIK","KING", "LECO", "WALK", "TOOK"), forecast_week < 14, forecast_week >0)|>mutate(forecast_week = as_factor(forecast_week)),
                     NSE_normed ~ 
                       site_id+
                       s(horizon)+
@@ -293,7 +424,7 @@ m3.beta_temp <- bam(data = df_gam_temperature|>filter(site_id %in% c("BLUE", "AR
                       #ti(horizon, forecast_week, by = site_id),
                     family = betar,
                     cluster = cl)
-toc() # 20 minutes
+toc() # 55 minutes
 
 ```
 
