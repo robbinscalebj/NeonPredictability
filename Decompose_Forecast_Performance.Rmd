@@ -19,69 +19,39 @@ library(doSNOW)
 source(here("download_target.R"))
 ```
 
-#Download archived forecasts
+# Retrieve archived forecasts
 ```{r}
-s3_aquatic <- arrow::s3_bucket(bucket = "neon4cast-scores/parquet/aquatics", endpoint_override= "data.ecoforecast.org")
-s3_pheno <- arrow::s3_bucket(bucket = "neon4cast-scores/parquet/phenology", endpoint_override= "data.ecoforecast.org")
-s3_terr <- arrow::s3_bucket(bucket = "neon4cast-scores/parquet/terrestrial_daily", endpoint_override= "data.ecoforecast.org")
-s3_beetle <- arrow::s3_bucket(bucket = "neon4cast-scores/parquet/beetles", endpoint_override= "data.ecoforecast.org")
-
-start_ref_date <- as_date('2023-01-01') # what period do you want the scores for?
-end_ref_date <- as_date('2023-12-31')
-get_refdates <- as.character(seq(start_ref_date, end_ref_date, by = 'day'))
-
-get_sites <- readr::read_csv("https://raw.githubusercontent.com/eco4cast/neon4cast-targets/main/NEON_Field_Site_Metadata_20220412.csv", show_col_types = F) |> 
-  #dplyr::filter(field_site_subtype == 'Wadeable Stream') |> # Subset to the stream sites
-  select(field_site_id) |> #slice_head(n = 5)|>
-  pull() # get in a vector
-
-get_variables <- c('temperature', 'oxygen', "chla", "gcc_90", "rcc_90", "le", "nee")
-
-aq_mods <- open_dataset(s3_aquatic)|>
-  select(model_id)|>distinct(model_id)|>
-  collect()|>
-  filter(str_detect(model_id, "tg_"))|>pull(model_id) 
-
-terr_mods <- open_dataset(s3_terr)|>
-  select(model_id)|>distinct(model_id)|>
-  collect()|>
-  filter(str_detect(model_id, "tg_"))|>pull(model_id) 
-
-pheno_mods <- open_dataset(s3_pheno)|>
-  select(model_id)|>distinct(model_id)|>
-  collect()|>
-  filter(str_detect(model_id, "tg_"))|>pull(model_id) 
-
-tg_mods <- c("tg_arima","tg_auto_adam","tg_bag_mlp","tg_bag_mlp_all_sites","tg_ets", "tg_humidity_lm", "tg_humidity_lm_all_sites", "tg_lasso","tg_lasso_all_sites", "tg_precip_lm","tg_precip_lm_all_sites", "tg_randfor","tg_randfor_all_sites","tg_tbats",      "tg_temp_lm","tg_temp_lm_all_sites") 
-
-aq_scores <- open_dataset(s3_aquatic)|>
-  filter(reference_datetime %in% get_refdates,
-         model_id %in% tg_mods,
-         site_id %in% get_sites,
-         variable %in% get_variables)|> 
-  collect() |> 
-  mutate(horizon = as.numeric(as_date(datetime) - as_date(reference_datetime)))
-
-terr_scores <- open_dataset(s3_terr) |>
-  filter(reference_datetime %in% get_refdates,
-         model_id %in% tg_mods,
-         site_id %in% get_sites,
-         variable %in% get_variables) |> 
-  collect() |> 
-  mutate(horizon = as.numeric(as_date(datetime) - as_date(reference_datetime)))
-
-pheno_scores <- open_dataset(s3_pheno) |>
-  filter(reference_datetime %in% get_refdates,
-         model_id %in% tg_mods,
-         site_id %in% get_sites,
-         variable %in% get_variables) |> 
-  collect() |> 
-  mutate(horizon = as.numeric(as_date(datetime) - as_date(reference_datetime)))
-
-scores_df <- bind_rows(aq_scores, pheno_scores,terr_scores)
+# if these are not local, they can be written in ~10 minutes(?) with script "download_scores_and_observations"
+aq_scores<-read_parquet(file = here("Data/Raw_Scores_and_Obs/aquatic_scores.parquet"))
+terr_scores<-read_parquet(file = here("Data/Raw_Scores_and_Obs/terrestrial_scores.parquet"))
+pheno_scores<-read_parquet(file = here("Data/Raw_Scores_and_Obs/phenology_scores.parquet"))
 
 ```
+
+
 ```{r}
+
+aq_scores_test <- aq_scores|>filter(horizon >= 0, horizon<35)|>filter(site_id == "BARC", variable %in% c("temperature", "chla"))|>
+  #group_by(model_id)|>count()
+  mutate(reference_datetime = as_date(reference_datetime))
+ 
+crps_scores_df <- aq_scores_test|>
+  filter(!is.na(median), !is.na(observation))|>
+  group_by(horizon, site_id, variable, reference_datetime)|>
+  summarize(obs = mean(observation),
+            crps = crps_sample(y = obs, dat = median))
+
+ggplot(crps_scores_df|>filter(variable == "chla", reference_datetime > as_datetime("2023-01-13")&reference_datetime < as_datetime("2023-01-23")), 
+       aes(x = horizon, y = crps))+
+  geom_point()+facet_wrap(.~reference_datetime)
+
+blah <- crps_scores_df|>filter(variable == "chla")
+blah2 <- aq_scores_test|>filter(reference_datetime==as_datetime("2023-01-20"), variable == "chla")
+
+ggplot(aq_scores_test|>filter(variable == "chla",horizon == 0), aes(x = reference_datetime, y = observation))+geom_point()
+                                filter(reference_datetime>=as_datetime("2023-01-18")&reference_datetime<=as_datetime("2023-01-22"))
+  
+
 scores_df <- bind_rows(aq_scores|>filter(horizon >= 0, horizon<35)|>group_by(variable, site_id, reference_datetime, horizon)|>summarize(median = median(median, na.rm = TRUE), mean = mean(mean, na.rm = TRUE)), 
                        pheno_scores|>filter(horizon >= 0, horizon<35)|>group_by(variable, site_id, reference_datetime, horizon)|>summarize(median = median(median, na.rm = TRUE), mean = mean(mean, na.rm = TRUE)),
                        terr_scores|>filter(horizon >= 0, horizon<35)|>group_by(variable, site_id, reference_datetime, horizon)|>summarize(median = median(median, na.rm = TRUE), mean = mean(mean, na.rm = TRUE)))
