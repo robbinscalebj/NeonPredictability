@@ -21,7 +21,9 @@ source(here("download_target.R"))
 
 # Read in forecast metrics
 ```{r}
+crps_scores_df <- read_parquet(here("Data/summarized_crps.parquet"))
 
+nnse_scores_df <- read_parquet(here("Data/summarized_weekly_normedNSE.parquet"))
 
 ```
 

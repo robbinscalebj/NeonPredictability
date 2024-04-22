@@ -1,9 +1,13 @@
+library(tidyverse)
+library(here)
+library(arrow)
+library(neon4cast)
+
 #Download archived forecasts and observations
 
 s3_aquatic <- arrow::s3_bucket(bucket = "neon4cast-scores/parquet/aquatics", endpoint_override= "data.ecoforecast.org")
 s3_pheno <- arrow::s3_bucket(bucket = "neon4cast-scores/parquet/phenology", endpoint_override= "data.ecoforecast.org")
 s3_terr <- arrow::s3_bucket(bucket = "neon4cast-scores/parquet/terrestrial_daily", endpoint_override= "data.ecoforecast.org")
-s3_beetle <- arrow::s3_bucket(bucket = "neon4cast-scores/parquet/beetles", endpoint_override= "data.ecoforecast.org")
 
 start_ref_date <- as_date('2023-01-01') # what period do you want the scores for?
 end_ref_date <- as_date('2023-12-31')
