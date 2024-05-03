@@ -27,6 +27,59 @@ nnse_scores_df <- read_parquet(here("Data/summarized_weekly_normedNSE.parquet"))
 
 ```
 
+# Data setup
+
+```{r}
+nnse_oxygen <- nnse_scores_df|>filter(variable == "oxygen")|>
+  mutate(site_id = as_factor(site_id),
+         forecast_week_fct = as_factor(forecast_week)) #important for 'by' variables in mgcv
+
+```
+
+```{r oxygen GAM fit}
+cl <- makeCluster(6)
+tic()
+oxy_beta.1 <- bam(data = nnse_oxygen|>filter(site_id %in% c("BLUE", "ARIK"), forecast_week < 14, forecast_week >0),
+                    NSE_normed ~ 
+                      site_id+  
+                      s(horizon)+  
+                      s(horizon, by = site_id)+
+                      s(horizon, forecast_week_fct, bs = "sz", by = site_id),
+                      ##s(horizon, forecast_week, bs = "sz"),
+                      ##s(forecast_week, bs= "cc", m = 2)+
+                      ##s(forecast_week, site_id, bs = "fs", xt = list(bs = "tp"))+
+                      ##ti(horizon, forecast_week, by = site_id),
+                    family = betar)
+toc()  #22 minutes - cluster doesn't help
+stopCluster(cl)
+
+tic()
+oxy_beta.2 <- bam(data = nnse_oxygen|>filter(site_id %in% c("BLUE", "ARIK"), forecast_week < 14, forecast_week >0),
+                    NSE_normed ~ 
+                      site_id+  
+                      s(horizon)+  
+                      s(horizon, by = site_id)+
+                      s(horizon)
+                    
+                      #s(forecast_week_fct, bs = "re", by = site_id)+
+                      s(forecast_week_fct, horizon, bs = "re", by = site_id),
+                      ##s(horizon, forecast_week, bs = "sz"),
+                      ##s(forecast_week, bs= "cc", m = 2)+
+                      ##s(forecast_week, site_id, bs = "fs", xt = list(bs = "tp"))+
+                      ##ti(horizon, forecast_week, by = site_id),
+                    family = betar)
+toc()  #3 sec - much shorter without cluster
+
+plot_predictions(oxy_beta.1, condition = c("horizon", "site_id", "forecast_week_fct"), type = "response", points = 0.5)+
+  facet_wrap(.~forecast_week_fct)
+
+plot_predictions(oxy_beta.1, #condition = c("horizon", "site_id"), 
+                 by = c("site_id","forecast_week_fct"), type = "response", points = 0.5)
+```
+
+
+#Deprecated 
+
 # GAM setup
 
 ```{r}
