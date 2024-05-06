@@ -34,6 +34,35 @@ crps_scores_df <- scores_df|>
 
 crps_scores_df|>write_parquet(here("Data/summarized_crps.parquet"))
 
+# calculate CRPS-based skill scores
+ ##download targets
+targets <- bind_rows(download_target("aquatics"),
+                     download_target("terrestrial_daily"),
+                     download_target("pheno"))
+
+
+target_clim <- targets %>%  
+  mutate(doy = yday(datetime)) %>% 
+  group_by(doy, site_id, variable) %>% 
+  summarise(mean = mean(observation, na.rm = TRUE),
+            sd = sd(observation, na.rm = TRUE),
+            .groups = "drop") %>% 
+  mutate(mean = ifelse(is.nan(mean), NA, mean))
+
+
+targets2 <- targets|>
+  filter(year(datetime) == 2023)|>
+  mutate(doy = yday(datetime))|>
+  right_join(target_clim)|>
+  filter(!is.na(mean), !is.na(sd))|>
+  #group_by(datetime, site_id, variable)|>
+  mutate(clim_crps = crps_norm(y = observation, mean = mean, sd = sd))
+
+
+crps_skill_scores_df <- crps_scores_df|>
+  left_join(targets2)
+
+
 
 # calculate normed NSE
 scores_df_nse <- bind_rows(read_parquet(file = here("Data/Raw_Scores_and_Obs/aquatic_scores.parquet"))|>filter(horizon >= 0, horizon<35)|>group_by(variable, site_id, reference_datetime, horizon)|>summarize(median = median(median, na.rm = TRUE), mean = mean(mean, na.rm = TRUE)), 
