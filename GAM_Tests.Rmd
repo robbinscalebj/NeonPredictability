@@ -1,0 +1,275 @@
+---
+title: "GAM Testing"
+output: html_document
+date: "2024-05-06"
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(here)
+library(arrow)
+library(neon4cast)
+library(yardstick)
+library(marginaleffects)
+library(mgcv)
+library(tidymv)
+library(tictoc)
+library(doParallel)
+library(doSNOW)
+source(here("download_target.R"))
+```
+
+# Read in forecast metrics
+```{r}
+crps_scores_df <- read_parquet(here("Data/summarized_crps.parquet"))
+
+nnse_scores_df <- read_parquet(here("Data/summarized_weekly_normedNSE.parquet"))
+
+```
+
+# Data setup
+
+```{r}
+nnse_oxygen <- nnse_scores_df|>filter(variable == "oxygen")|>
+  mutate(site_id = as_factor(site_id),
+         forecast_week_fct = as_factor(forecast_week)) #important for 'by' variables in mgcv
+
+
+crps_df <- crps_scores_df|>#filter(variable == "oxygen")|>
+  group_by(variable)|>
+  mutate(forecast_month = month(reference_datetime),
+         forecast_week = week(reference_datetime))|>
+  group_by(variable, horizon, site_id, forecast_week)|>
+  summarize(mean_crps_skill = mean(crps_skill, na.rm = TRUE))|>
+  mutate(site_id = as_factor(site_id),
+         forecast_week_fct = as_factor(forecast_week),
+         variable = as_factor(variable))|>
+  ungroup()|>
+  arrange(variable, forecast_week, site_id, horizon)|>
+  group_by(variable, site_id, forecast_week)|>
+  mutate(horizon_arstart = ifelse(row_number()==1, TRUE, FALSE))
+```
+
+# GAM
+
+## CRPS Skill
+
+### Full data set
+Really think these have to be done by variable - this takes an enormous amoutn of time to fit and it's not even the whole data set AND it's not even all the components we want to estimate 
+```{r}
+cl <- makeCluster(7)
+tic()
+crps.m1.full <- bam(data = crps_df|>filter(forecast_week == 35),
+                    mean_crps_skill ~ 
+                      s(horizon, by = variable)+  # central trend for each variable
+                      s(horizon, site_id, bs = "sz", by = variable), #site-level deviations from central trend
+                     # s(forecast_week, bs = "cc", by = variable)+ #trend for forecast week
+                      #ti(horizon, forecast_week, by = variable), #allow effect of horizon to vary based on week
+                    family = gaussian())
+stopCluster(cl)
+toc() 
+
+
+plot_predictions(crps.m1.full, condition = c("horizon", "site_id", "forecast_week_fct"), type = "response", points = 0.5)+
+  facet_wrap(.~variable)
+
+plot_predictions(crps.m1.full, #condition = c("horizon", "site_id"), 
+                 by = c("site_id","forecast_week_fct"), type = "response", points = 0.5)
+```
+
+### GAM by variable
+```{r Oxygen base model}
+
+tic()
+crps.oxy.m0 <- bam(data = crps_df|>filter(variable == "oxygen"),
+                    mean_crps_skill ~ 
+                      s(horizon),  # central trend
+                    family = gaussian())
+toc() # 0.6 s
+
+
+plot_predictions(crps.oxy.m0, condition = "horizon")
+
+```
+
+```{r Oxygen add site-level deviations}
+cl <- makeCluster(6)
+tic()
+crps.oxy.m1 <- bam(data = crps_df|>filter(variable == "oxygen"),#|>filter(forecast_week == 35),
+                    mean_crps_skill ~ 
+                      s(horizon)+  # central trend
+                      s(horizon, site_id, bs = "sz"), #site-level deviations from central trend
+                     # s(forecast_week, bs = "cc", by = variable)+ #trend for forecast week
+                      #ti(horizon, forecast_week, by = variable), #allow effect of horizon to vary based on week
+                    family = gaussian())
+stopCluster(cl)
+toc() 
+
+
+plot_predictions(crps.oxy.m1, condition = c("horizon", "site_id"), type = "response", points = 0.5)
+
+plot_predictions(crps.m1, #condition = c("horizon", "site_id"), 
+                 by = c("site_id","forecast_week_fct"), type = "response", points = 0.5)
+```
+
+```{r Oxygen add temporal changing intercept}
+cl <- makeCluster(6)
+tic()
+crps.oxy.m2 <- bam(data = crps_df|>filter(variable == "oxygen"),#|>filter(forecast_week == 35),
+                    mean_crps_skill ~ 
+                      s(horizon)+  # central trend
+                      s(horizon, site_id, bs = "sz")+ #site-level deviations from central trend
+                      s(forecast_week, bs = "cc"), #trend for forecast week
+                    family = gaussian(), cluster = cl)
+stopCluster(cl)
+toc() #119 s
+
+
+plot_predictions(crps.oxy.m2, condition = c("horizon", "site_id"), type = "response", points = 0.5)
+plot_predictions(crps.oxy.m2, condition = c("horizon"), type = "response", points = 0.5)
+
+plot_predictions(crps.oxy.m2, condition = c("horizon", "forecast_week"), type = "response", points = 0.5)
+```
+
+```{r Oxygen add temporal interaction with horizon}
+cl <- makeCluster(6)
+tic()
+crps.oxy.m3 <- bam(data = crps_df|>filter(variable == "oxygen"),#|>filter(forecast_week == 35),
+                    mean_crps_skill ~ 
+                      s(horizon)+  # central trend
+                      s(horizon, site_id, bs = "sz")+ #site-level deviations from central trend
+                      s(forecast_week, bs = "cc")+ #trend for forecast week
+                      ti(horizon, forecast_week), #allow effect of horizon to vary based on week
+                    family = gaussian(), cluster = cl)
+stopCluster(cl)
+toc() # 100 s
+
+
+plot_predictions(crps.oxy.m3, condition = c("horizon", "site_id"), type = "response")
+plot_predictions(crps.oxy.m3, condition = c("horizon"), type = "response", points = 0.5)
+
+plot_predictions(crps.oxy.m3, condition = c("horizon", "forecast_week"), type = "response")
+```
+
+```{r Oxygen add temporal interaction at site level}
+cl <- makeCluster(6)
+tic()
+crps.oxy.m4 <- bam(data = crps_df|>filter(variable == "oxygen")|>filter(horizon <=30),#For testing |>filter(forecast_week == 35),
+                    mean_crps_skill ~ 
+                      s(horizon)+  # central trend
+                      s(horizon, site_id, bs = "sz")+ #site-level deviations from central trend
+                      s(forecast_week, bs = "cc")+ #trend for forecast week
+                      ti(horizon, forecast_week)+ #allow effect of horizon to vary based on week
+                      s(forecast_week, site_id, bs = "fs", xt= list(bs = "cc")), #site-level deviation for forecast week effect
+                    family = gaussian(), cluster = cl)
+stopCluster(cl)
+toc() #200 s
+
+#AIC(crps.oxy.m0,crps.oxy.m1,crps.oxy.m2,crps.oxy.m3,crps.oxy.m4)
+
+oxy_average_forecast.p<-plot_predictions(crps.oxy.m4, condition = c("horizon"), type = "response") # what is the average oxygen forecast?
+
+oxy_hoorizonXsite.p <- plot_predictions(crps.oxy.m4, condition = c("horizon", "site_id"), type = "response")
+
+oxy_skillXsiteXweek.p <- plot_predictions(crps.oxy.m4, condition = c("site_id", "forecast_week"), type = "response")+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5))
+plotly::ggplotly(oxy_hoorizonXsite.p)
+# think wha't sgoing on with many of these is marginal effects is making an even grid for plotting and predicting out of data bounds (splines going crazy) - need to use newdata function
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### Temp
+```{r Temperature full model}
+cl <- makeCluster(6)
+tic()
+crps.temp.m4 <- bam(data = crps_df|>filter(variable == "temperature")|>filter(horizon <= 31),
+                    mean_crps_skill ~ 
+                      s(horizon)+  # central trend
+                      s(horizon, site_id, bs = "sz")+ #site-level deviations from central trend
+                      s(forecast_week, bs = "cc")+ #trend for forecast week
+                      ti(horizon, forecast_week)+ #allow effect of horizon to vary based on week
+                      s(forecast_week, site_id, bs = "fs", xt= list(bs = "cc")), #site-level deviation for forecast week effect
+                    family = gaussian(), cluster = cl)
+stopCluster(cl)
+toc() # 164 s
+
+rho <- acf(resid(crps.temp.m4, type = "pearson"), lag.max = 30, plot=TRUE)$acf[2]
+itsadug::start_value_rho(crps.temp.m4)
+
+cl <- makeCluster(6)
+tic()
+crps.temp.m4_rhoar1 <- bam(data = crps_df|>filter(variable == "temperature")|>filter(horizon <= 31),
+                    mean_crps_skill ~ 
+                      s(horizon)+  # central trend
+                      s(horizon, site_id, bs = "sz")+ #site-level deviations from central trend
+                      s(forecast_week, bs = "cc")+ #trend for forecast week
+                      ti(horizon, forecast_week)+ #allow effect of horizon to vary based on week
+                      s(forecast_week, site_id, bs = "fs", xt= list(bs = "cc")), #site-level deviation for forecast week effect
+                    family = gaussian(), cluster = cl, rho = rho, AR.start = horizon_arstart)
+stopCluster(cl)
+toc() #  128s
+acf(resid(crps.temp.m4, type = "pearson"))
+acf(itsadug::resid_gam(crps.temp.m4_rhoar1))
+
+itsadug::acf_resid(crps.temp.m4_rhoar1, split_pred = c("horizon"))
+
+acf(residuals.gam(crps.temp.m4_rhoar1, type = "pearson"))
+
+AIC(crps.temp.m4,crps.temp.m4_rhoar1)
+plot_predictions(crps.temp.m4, condition = c("horizon", "site_id"), type = "response")
+plot_predictions(crps.temp.m4, condition = c("horizon"), type = "response")+ # what is the average temperature forecast?
+  scale_y_continuous(limits = c(-4,0))
+
+
+
+plot_predictions(crps.temp.m4_rhoar1, condition = c("horizon"), type = "response")
+plot_predictions(crps.temp.m4_rhoar1, condition = c("horizon", "site_id"), type = "response")
+plot_predictions(crps.temp.m4_rhoar1, condition = c("site_id", "forecast_week"), type = "response")+
+  scale_y_continuous(limits = c(-5,5))
+plot_predictions(crps.temp.m4_rhoar1, condition = c("site_id"), type = "response")
+```
+
+```{r Temperature GAMM}
+tic()
+crps.temp.m4_ar1 <- gamm(data = crps_df|>filter(variable == "temperature")|>filter(horizon <= 31, site_id %in% c("ARIK", "KING")),
+                    mean_crps_skill ~ 
+                      s(horizon)+  # central trend
+                      s(horizon, site_id, bs = "fs")+ #site-level deviations from central trend
+                      s(forecast_week, bs = "cc")+ #trend for forecast week
+                      ti(horizon, forecast_week)+ #allow effect of horizon to vary based on week
+                      s(forecast_week, site_id, bs = "fs", xt= list(bs = "cc")), #site-level deviation for forecast week effect
+                    correlation = corAR1(form = ~horizon|forecast_week_fct*site_id),
+                    family = gaussian())
+
+toc()
+nwemod <-crps.temp.m4_ar1$lme$residuals
+acf(nwemod)
+acf(resid(crps.temp.m4_ar1$lme))
+acf(resid(crps.temp.m4))
+```

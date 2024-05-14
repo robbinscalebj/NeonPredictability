@@ -11,6 +11,7 @@ library(here)
 library(arrow)
 library(neon4cast)
 library(yardstick)
+library(marginaleffects)
 library(mgcv)
 library(tidymv)
 library(tictoc)
@@ -34,13 +35,22 @@ nnse_oxygen <- nnse_scores_df|>filter(variable == "oxygen")|>
   mutate(site_id = as_factor(site_id),
          forecast_week_fct = as_factor(forecast_week)) #important for 'by' variables in mgcv
 
+
+crps_df <- crps_scores_df|>#filter(variable == "oxygen")|>
+  group_by(variable)|>
+  mutate(forecast_month = month(reference_datetime),
+         forecast_week = week(reference_datetime))|>
+  group_by(variable, horizon, site_id, forecast_week)|>
+  summarize(mean_crps_skill = mean(crps_skill, na.rm = TRUE))|>
+  mutate(site_id = as_factor(site_id),
+         forecast_week_fct = as_factor(forecast_week)) 
 ```
 
 ```{r oxygen GAM fit}
 cl <- makeCluster(6)
 tic()
-oxy_beta.1 <- bam(data = nnse_oxygen|>filter(site_id %in% c("BLUE", "ARIK"), forecast_week < 14, forecast_week >0),
-                    NSE_normed ~ 
+oxy_beta.1 <- bam(data = crps_oxygen|>filter(site_id %in% c("BLUE", "ARIK"), forecast_week < 14, forecast_week >0),
+                    mean_crps_skill ~ 
                       site_id+  
                       s(horizon)+  
                       s(horizon, by = site_id)+
@@ -53,30 +63,171 @@ oxy_beta.1 <- bam(data = nnse_oxygen|>filter(site_id %in% c("BLUE", "ARIK"), for
 toc()  #22 minutes - cluster doesn't help
 stopCluster(cl)
 
-tic()
-oxy_beta.2 <- bam(data = nnse_oxygen|>filter(site_id %in% c("BLUE", "ARIK"), forecast_week < 14, forecast_week >0),
-                    NSE_normed ~ 
+oxy_beta.1 <- bam(data = crps_oxygen|>filter(site_id %in% c("BLUE", "ARIK"), forecast_week < 14, forecast_week >0),
+                    mean_crps_skill ~ 
                       site_id+  
                       s(horizon)+  
                       s(horizon, by = site_id)+
-                      s(horizon)
-                    
-                      #s(forecast_week_fct, bs = "re", by = site_id)+
-                      s(forecast_week_fct, horizon, bs = "re", by = site_id),
+                      s(horizon, forecast_week_fct, bs = "sz", by = site_id),
                       ##s(horizon, forecast_week, bs = "sz"),
                       ##s(forecast_week, bs= "cc", m = 2)+
                       ##s(forecast_week, site_id, bs = "fs", xt = list(bs = "tp"))+
                       ##ti(horizon, forecast_week, by = site_id),
                     family = betar)
+
+tic()
+oxy_beta.2 <- bam(data = crps_df|>filter(forecast_week == 35),
+                    mean_crps_skill ~ 
+                      s(horizon, by = variable)+  # central trend
+                      s(horizon, site_id, bs = "sz", by = variable)+ #deviations from central trend
+                      s(forecast_week, bs = "cc", by = variable)+ #trend for forecast week
+                      ti(horizon, forecast_week, by = variable), #allow effect of horizon to vary based on week
+                    family = gaussian())
 toc()  #3 sec - much shorter without cluster
 
-plot_predictions(oxy_beta.1, condition = c("horizon", "site_id", "forecast_week_fct"), type = "response", points = 0.5)+
+plot_predictions(oxy_beta.2, condition = c("horizon", "site_id", "forecast_week_fct"), type = "response", points = 0.5)+
   facet_wrap(.~forecast_week_fct)
 
-plot_predictions(oxy_beta.1, #condition = c("horizon", "site_id"), 
+plot_predictions(oxy_beta.2, #condition = c("horizon", "site_id"), 
                  by = c("site_id","forecast_week_fct"), type = "response", points = 0.5)
 ```
+```{r loops}
+# data setup
+df_gam_nested <- crps_df|>
+  mutate(variable = case_when(variable == "gcc_90" ~ "gcc90", 
+                              variable == "rcc_90" ~ "rcc90",
+                              .default = variable))|>
+  #filter(site_id %in% c("BLUE", "ARIK"), forecast_week < 42, forecast_week >0)|>
+  #filter(site_id %in% c("BLUE", "ARIK"), forecast_week == 42)|>
+  filter(!is.na(mean_crps_skill))|>
+  select(variable,site_id, horizon,forecast_week,mean_crps_skill)|>
+  group_by(variable,site_id, forecast_week)|>
+  mutate(weekly_points = n())|>
+  filter(weekly_points>10)|> 
+  ungroup()|>
+  mutate(forecast_week = as_factor(forecast_week))|>
+  nest_by(variable,forecast_week, site_id)|>
+  ungroup()|>
+  mutate(batch_name = str_c(variable, "_",site_id, "_",forecast_week),
+         batch_number = row_number())
 
+batch_names <- df_gam_nested|>pull(batch_name)
+#set up options and parallelization
+cl <- makePSOCKcluster(14) 
+registerDoSNOW(cl)
+pb <- txtProgressBar(max = nrow(df_gam_nested), style = 3)
+progress <- function(n) setTxtProgressBar(pb, n)
+opts <- list(progress = progress)
+
+# Loop
+tic()
+gam_preds <- foreach(i = 1:nrow(df_gam_nested), .combine = 'c', .options.snow = opts, 
+        .packages = c("tidyverse", "mgcv","tidymv"), .inorder = TRUE, .final = function(x) setNames(x, batch_names)) %dopar% {
+          
+          #subset data
+          gam_data <- df_gam_nested|>filter(batch_number == i)|>unnest(data)
+          
+          #fit gam
+         gam_obj <- gam(data = gam_data, 
+    mean_crps_skill ~ s(horizon),
+    family = gaussian)
+         
+         #extract predictions
+         preds <- predict_gam(gam_obj, length_out = 100, 
+                       values = list(horizon = seq(0,33, by = 1)))|>
+  mutate(crps_fit = fit)|> 
+  mutate(upper.se = fit+1.96*se.fit,
+         lower.se = fit-1.96*se.fit)|>
+           mutate(crps_diff = crps_fit-lag(crps_fit),
+                  crps_diff2 = crps_diff-lag(crps_diff))
+    
+         #extract edf
+         edf <- summary(gam_obj)$edf
+         
+         #bundle up into list
+          list(list(#fitted_model = gam_obj, #so short to run, don't need to be saving the model fits
+                    edf = edf, 
+                    prediction_df = preds))
+        }     
+stopCluster(cl)
+toc() 
+
+```
+
+```{r}
+
+# Wiggliness (edf)
+edfs_df <- gam_preds|>
+  map(~pluck(., "edf")|>as_tibble_col(column_name = "edf"))|>
+  list_rbind(names_to = "id")
+
+preds_df <- gam_preds|>
+  map(~pluck(., "prediction_df"))|>
+  list_rbind(names_to = "id")
+  
+p_df <- preds_df|>
+  separate_wider_delim(id, "_", names = c("variable", "site","forecast_week"))|>
+  mutate(forecast_week = as.numeric(forecast_week))|>
+  filter(site == "HARV", variable == "gcc90", forecast_week == "32")|>
+  rename(mean_crps_skill = "fit")
+
+ggplot(data = p_df, aes(x = horizon, y = mean_crps_skill))+
+  geom_smooth(se=FALSE)+
+  geom_smooth(aes(x = horizon, y = upper.se),se = FALSE, color = "red")+
+  geom_smooth(aes(x = horizon, y = lower.se),se = FALSE, color = "red")+
+  geom_point(data = crps_df|>filter(site_id == "HARV", variable == "gcc_90", forecast_week == "32")|>
+                      mutate(forecast_week = as_factor(forecast_week)), 
+             aes(x = horizon, y = mean_crps_skill))+
+  xlab("Forecast Horizon (days)")+
+  ylab("CRPS Skill")+
+  theme_bw()+
+  theme(legend.position  = c(0.75,0.15), legend.title = element_blank(),
+        axis.title.y = element_text(size = 18),axis.title.x = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(face = "bold"), axis.text.y = element_text(face = "bold"),
+        strip.text = element_text(face = "bold", size = 12), legend.text = element_text(size = 10, face = "bold"))+
+  guides(color=guide_legend(nrow=4))
+
+```
+
+
+```{r}
+
+#average slope
+avg_slope_df <- preds_df|>
+  group_by(id)|>
+  summarize(avg_1der = mean(crps_diff, na.rm = TRUE),
+          crps_0 = crps_fit[horizon == 0],
+          crps_5 = crps_fit[horizon == 5],
+          crps_10 = crps_fit[horizon == 10],
+          crps_15 = crps_fit[horizon == 15],
+          crps_33 = crps_fit[horizon == 33],
+          )|>
+  mutate(crps_change_33 = crps_33-crps_0,
+         crps_change_5 = crps_5-crps_0,
+         crps_change_10 = crps_10-crps_0) #dividing this by 33 gives exact avg_1der
+
+fn_characteristics_df<-edfs_df|>left_join(avg_slope_df)|>
+  separate_wider_delim(id, "_", names = c("variable", "site","forecast_week"))|>
+  mutate(forecast_week = as.numeric(forecast_week))
+
+
+ggplot(fn_characteristics_df, aes(x = edf))+
+  geom_density()+
+  facet_wrap(.~variable)
+
+ggplot(fn_characteristics_df, aes(x = crps_0))+
+  geom_density()+
+  facet_wrap(.~variable)
+
+ggplot(fn_characteristics_df, aes(x = crps_change_10))+
+  geom_density()+
+  facet_wrap(.~variable)
+
+ggplot(fn_characteristics_df, aes(x = avg_1der))+
+  geom_density()+
+  facet_wrap(.~variable, scales = "free")
+
+```
 
 #Deprecated 
 

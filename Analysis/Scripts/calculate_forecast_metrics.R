@@ -23,16 +23,16 @@ rm(aq_scores, terr_scores, pheno_scores)
 
 
 # calculate crps
-
+ #this takes maybe 10 minutes? Didn't clock it...
 crps_scores_df <- scores_df|>
   filter(horizon >= 0, horizon<35)|>
   filter(!is.na(median), !is.na(observation))|>
   group_by(horizon, site_id, variable, reference_datetime)|>
   summarize(obs = mean(observation),
-            crps = crps_sample(y = obs, dat = median))
+            crps = crps_sample(y = obs, dat = median))|>
+  ungroup()
 
 
-crps_scores_df|>write_parquet(here("Data/summarized_crps.parquet"))
 
 # calculate CRPS-based skill scores
  ##download targets
@@ -41,12 +41,13 @@ targets <- bind_rows(download_target("aquatics"),
                      download_target("pheno"))
 
 
-target_clim <- targets %>%  
-  mutate(doy = yday(datetime)) %>% 
-  group_by(doy, site_id, variable) %>% 
+target_clim <- targets |>  
+  mutate(doy = yday(datetime)) |> 
+  filter(year(datetime) < 2023)|>
+  group_by(doy, site_id, variable) |> 
   summarise(mean = mean(observation, na.rm = TRUE),
             sd = sd(observation, na.rm = TRUE),
-            .groups = "drop") %>% 
+            .groups = "drop") |> 
   mutate(mean = ifelse(is.nan(mean), NA, mean))
 
 
@@ -59,9 +60,15 @@ targets2 <- targets|>
   mutate(clim_crps = crps_norm(y = observation, mean = mean, sd = sd))
 
 
-crps_skill_scores_df <- crps_scores_df|>
-  left_join(targets2)
+crps_skill_scores_df <- crps_scores_df|>ungroup()|>
+  mutate(datetime = as_date(reference_datetime) + days(horizon))|>
+  left_join(targets2|>ungroup(), by = c("datetime", "variable", "site_id"))|>
+  mutate(crps_skill = clim_crps - crps)
+  
 
+crps_skill_scores_df|>write_parquet(here("Data/summarized_crps.parquet"))
+
+#crps_skill_scores_df <- read_parquet(here("Data/summarized_crps.parquet"))
 
 
 # calculate normed NSE
@@ -93,7 +100,6 @@ forecasts2 <- scores_df_nse|>
   left_join(hist_mean_obs)
 
 df2 <- forecasts2|>rename(reference_datetime = "datetime")|>
-  # filter(!(variable %in% c("abundance", "amblyomma_americanum", "richness")))|>
   group_by(variable)|>
   mutate(forecast_month = month(reference_datetime),
          forecast_week = week(reference_datetime))|>
