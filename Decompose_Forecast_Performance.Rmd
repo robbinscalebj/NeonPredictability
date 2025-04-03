@@ -78,7 +78,7 @@ oxy_beta.1 <- bam(data = crps_oxygen|>filter(site_id %in% c("BLUE", "ARIK"), for
 tic()
 oxy_beta.2 <- bam(data = crps_df|>filter(forecast_week == 35),
                     mean_crps_skill ~ 
-                      s(horizon, by = variable)+  # central trend
+                      s(horizon, by = variable))#+  # central trend
                       s(horizon, site_id, bs = "sz", by = variable)+ #deviations from central trend
                       s(forecast_week, bs = "cc", by = variable)+ #trend for forecast week
                       ti(horizon, forecast_week, by = variable), #allow effect of horizon to vary based on week
@@ -87,9 +87,37 @@ toc()  #3 sec - much shorter without cluster
 
 plot_predictions(oxy_beta.2, condition = c("horizon", "site_id", "forecast_week_fct"), type = "response", points = 0.5)+
   facet_wrap(.~forecast_week_fct)
-
+oxy_hoorizonXsite.p <- plot_predictions(crps.oxy.m4, condition = c("horizon", "site_id"), type = "response")
+plotly::ggplotly(oxy_hoorizonXsite.p)
 plot_predictions(oxy_beta.2, #condition = c("horizon", "site_id"), 
                  by = c("site_id","forecast_week_fct"), type = "response", points = 0.5)
+```
+
+```{r}
+cl <- makeCluster(6)
+tic()
+crps.oxy.m4a <- bam(data = crps_df|>
+                     filter(variable == "oxygen")|>
+                     filter(horizon <=30)|>
+                     filter(site_id != "BIGC"),#For testing |>filter(forecast_week == 35),
+                    mean_crps_skill ~ 
+                      s(horizon)+  # central trend
+                      s(horizon, site_id, bs = "sz")+ #site-level deviations from central trend
+                      s(forecast_week, bs = "cc")+ #trend for forecast week
+                      ti(horizon, forecast_week)+ #allow effect of horizon to vary based on week
+                      s(forecast_week, site_id, bs = "fs", xt= list(bs = "cc")), #site-level deviation for forecast week effect
+                    family = gaussian(), cluster = cl)
+stopCluster(cl)
+toc()
+
+oxy_hoorizonXsite.pa <- plot_predictions(crps.oxy.m4a, condition = c("horizon", "site_id"), type = "response")
+plotly::ggplotly(oxy_hoorizonXsite.pa)
+
+oxy_hoorizonXsite.pa+
+  theme_classic()+
+  theme(legend.position = "none")+
+  xlab("Forecast Horizon (days into future)")+
+  ylab("Dissolved Oxygen Forecast Skill (CRPS)") #this is CRPSclim - CRPS
 ```
 ```{r loops}
 # data setup
