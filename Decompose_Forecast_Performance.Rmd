@@ -13,7 +13,7 @@ library(neon4cast)
 library(yardstick)
 library(marginaleffects)
 library(mgcv)
-library(tidymv)
+#library(tidymv)
 library(tictoc)
 library(doParallel)
 library(doSNOW)
@@ -96,7 +96,23 @@ plot_predictions(oxy_beta.2, #condition = c("horizon", "site_id"),
 ```{r}
 cl <- makeCluster(6)
 tic()
-crps.oxy.m4a <- bam(data = crps_df|>
+crps.temp <- bam(data = crps_df|>
+                     filter(variable == "temperature")|>
+                     filter(horizon <=30)|>
+                     filter(site_id != "BIGC"),#For testing |>filter(forecast_week == 35),
+                    mean_crps_skill ~ 
+                      s(horizon)+  # central trend
+                      s(horizon, site_id, bs = "sz")+ #site-level deviations from central trend
+                      s(forecast_week, bs = "cc")+ #trend for forecast week
+                      ti(horizon, forecast_week)+ #allow effect of horizon to vary based on week
+                      s(forecast_week, site_id, bs = "fs", xt= list(bs = "cc")), #site-level deviation for forecast week effect
+                    family = gaussian(), cluster = cl)
+stopCluster(cl)
+toc()
+
+cl <- makeCluster(6)
+tic()
+crps.oxy <- bam(data = crps_df|>
                      filter(variable == "oxygen")|>
                      filter(horizon <=30)|>
                      filter(site_id != "BIGC"),#For testing |>filter(forecast_week == 35),
@@ -110,15 +126,187 @@ crps.oxy.m4a <- bam(data = crps_df|>
 stopCluster(cl)
 toc()
 
-oxy_hoorizonXsite.pa <- plot_predictions(crps.oxy.m4a, condition = c("horizon", "site_id"), type = "response")
-plotly::ggplotly(oxy_hoorizonXsite.pa)
+cl <- makeCluster(6)
+tic()
+crps.chla <- bam(data = crps_df|>
+                     filter(variable == "chla")|>
+                     filter(horizon <=30)|>
+                     filter(site_id != "BIGC"),#For testing |>filter(forecast_week == 35),
+                    mean_crps_skill ~ 
+                      s(horizon)+  # central trend
+                      s(horizon, site_id, bs = "sz")+ #site-level deviations from central trend
+                      s(forecast_week, bs = "cc")+ #trend for forecast week
+                      ti(horizon, forecast_week)+ #allow effect of horizon to vary based on week
+                      s(forecast_week, site_id, bs = "fs", xt= list(bs = "cc")), #site-level deviation for forecast week effect
+                    family = gaussian(), cluster = cl)
+stopCluster(cl)
+toc()
 
-oxy_hoorizonXsite.pa+
-  theme_classic()+
+cl <- makeCluster(6)
+tic()
+crps.le<- bam(data = crps_df|>
+                     filter(variable == "le")|>
+                     filter(horizon <=30)|>
+                     filter(site_id != "BIGC"),#For testing |>filter(forecast_week == 35),
+                    mean_crps_skill ~ 
+                      s(horizon)+  # central trend
+                      s(horizon, site_id, bs = "sz")+ #site-level deviations from central trend
+                      s(forecast_week, bs = "cc")+ #trend for forecast week
+                      ti(horizon, forecast_week)+ #allow effect of horizon to vary based on week
+                      s(forecast_week, site_id, bs = "fs", xt= list(bs = "cc")), #site-level deviation for forecast week effect
+                    family = gaussian(), cluster = cl)
+stopCluster(cl)
+toc()
+
+cl <- makeCluster(6)
+tic()
+crps.nee <- bam(data = crps_df|>
+                     filter(variable == "nee")|>
+                     filter(horizon <=30)|>
+                     filter(site_id != "BIGC"),#For testing |>filter(forecast_week == 35),
+                    mean_crps_skill ~ 
+                      s(horizon)+  # central trend
+                      s(horizon, site_id, bs = "sz")+ #site-level deviations from central trend
+                      s(forecast_week, bs = "cc")+ #trend for forecast week
+                      ti(horizon, forecast_week)+ #allow effect of horizon to vary based on week
+                      s(forecast_week, site_id, bs = "fs", xt= list(bs = "cc")), #site-level deviation for forecast week effect
+                    family = gaussian(), cluster = cl)
+stopCluster(cl)
+toc()
+
+cl <- makeCluster(6)
+tic()
+crps.gcc_90 <- bam(data = crps_df|>
+                     filter(variable == "gcc_90")|>
+                     filter(horizon <=30)|>
+                     filter(site_id != "BIGC"),#For testing |>filter(forecast_week == 35),
+                    mean_crps_skill ~ 
+                      s(horizon)+  # central trend
+                      s(horizon, site_id, bs = "sz")+ #site-level deviations from central trend
+                      s(forecast_week, bs = "cc")+ #trend for forecast week
+                      ti(horizon, forecast_week)+ #allow effect of horizon to vary based on week
+                      s(forecast_week, site_id, bs = "fs", xt= list(bs = "cc")), #site-level deviation for forecast week effect
+                    family = gaussian(), cluster = cl)
+stopCluster(cl)
+toc()
+
+cl <- makeCluster(6)
+tic()
+crps.rcc_90 <- bam(data = crps_df|>
+                     filter(variable == "rcc_90")|>
+                     filter(horizon <=30)|>
+                     filter(site_id != "BIGC"),#For testing |>filter(forecast_week == 35),
+                    mean_crps_skill ~ 
+                      s(horizon)+  # central trend
+                      s(horizon, site_id, bs = "sz")+ #site-level deviations from central trend
+                      s(forecast_week, bs = "cc")+ #trend for forecast week
+                      ti(horizon, forecast_week)+ #allow effect of horizon to vary based on week
+                      s(forecast_week, site_id, bs = "fs", xt= list(bs = "cc")), #site-level deviation for forecast week effect
+                    family = gaussian(), cluster = cl)
+stopCluster(cl)
+toc()
+
+```
+
+
+```{r model checks}
+appraise(crps.oxy)
+appraise(crps.temp)
+appraise(crps.chla)
+appraise(crps.nee)
+appraise(crps.le)
+appraise(crps.gcc_90)
+appraise(crps.rcc_90) #weird autocorrelation or something in here
+
+```
+
+
+```{r plot predictions site by horizon}
+horsite_theme<-  theme_classic()+
   theme(legend.position = "none")+
   xlab("Forecast Horizon (days into future)")+
-  ylab("Dissolved Oxygen Forecast Skill (CRPS)") #this is CRPSclim - CRPS
+  ylab("Dissolved Oxygen Forecast Skill (CRPS)")
+
+oxy_horizonXsite.pa <- plot_predictions(crps.oxy, condition = c("horizon", "site_id"), type = "response")+
+  horsite_theme
+temp_horizonXsite.pa <- plot_predictions(crps.temp, condition = c("horizon", "site_id"), type = "response")+
+  horsite_theme
+chla_horizonXsite.pa <- plot_predictions(crps.chla, condition = c("horizon", "site_id"), type = "response")+
+  horsite_theme
+nee_horizonXsite.pa <- plot_predictions(crps.nee, condition = c("horizon", "site_id"), type = "response")+
+  horsite_theme
+le_horizonXsite.pa <- plot_predictions(crps.le, condition = c("horizon", "site_id"), type = "response")+
+  horsite_theme
+rcc90_horizonXsite.pa <- plot_predictions(crps.rcc_90, condition = c("horizon", "site_id"), type = "response")+
+  horsite_theme
+gcc90_horizonXsite.pa <- plot_predictions(crps.gcc_90, condition = c("horizon", "site_id"), type = "response")+
+  horsite_theme
+
+#plotly::ggplotly(oxy_horizonXsite.pa)
+
+oxy_horizonXsite.pa
+temp_horizonXsite.pa
+chla_horizonXsite.pa
+nee_horizonXsite.pa
+le_horizonXsite.pa
+rcc90_horizonXsite.pa
+gcc90_horizonXsite.pa
+
 ```
+
+```{r}
+# Coefficient of variation in slope
+# Coefficient of variation in skill at different horizons
+newdata_horizons <- c(1,5,10,15,20,25,30)
+sites_oxy <- crps_df|>ungroup()|>filter(variable == "oxygen")|>
+                     filter(site_id != "BIGC")|>distinct(site_id)|>pull(site_id)
+sites_temp <- crps_df|>ungroup()|>filter(variable == "temperature")|>
+                     filter(site_id != "BIGC")|>distinct(site_id)|>pull(site_id)
+sites_chla <- crps_df|>ungroup()|>filter(variable == "chla")|>
+                     filter(site_id != "BIGC")|>distinct(site_id)|>pull(site_id)
+sites_nee <- crps_df|>ungroup()|>filter(variable == "nee")|>
+                     filter(site_id != "BIGC")|>distinct(site_id)|>pull(site_id)
+sites_le <- crps_df|>ungroup()|>filter(variable == "le")|>
+                     filter(site_id != "BIGC")|>distinct(site_id)|>pull(site_id)
+sites_rcc_90 <- crps_df|>ungroup()|>filter(variable == "rcc_90")|>
+                     filter(site_id != "BIGC")|>distinct(site_id)|>pull(site_id)
+sites_gcc_90 <- crps_df|>ungroup()|>filter(variable == "gcc_90")|>
+                     filter(site_id != "BIGC")|>distinct(site_id)|>pull(site_id)
+
+
+oxy_horizonXsite.preds <- predictions(crps.oxy, exclude = c("forecast_week"), #type = "response", 
+                                      newdata = expand_grid(horizon = newdata_horizons, site_id = sites_oxy, forecast_week = 15))
+#oxy_horizonXsite.preds2 <- avg_predictions(crps.oxy, variables = c("site_id", "horizon"))
+temp_horizonXsite.preds <- predictions(crps.temp, exclude = c("forecast_week"), #type = "response", 
+                                      newdata = expand_grid(horizon = newdata_horizons, site_id = sites_temp, forecast_week = 15))
+chla_horizonXsite.preds <- predictions(crps.chla, exclude = c("forecast_week"), #type = "response", 
+                                      newdata = expand_grid(horizon = newdata_horizons, site_id = sites_chla, forecast_week = 15))
+nee_horizonXsite.preds <- predictions(crps.nee, exclude = c("forecast_week"), #type = "response", 
+                                      newdata = expand_grid(horizon = newdata_horizons, site_id = sites_nee, forecast_week = 15))
+le_horizonXsite.preds <- predictions(crps.le, exclude = c("forecast_week"), #type = "response", 
+                                      newdata = expand_grid(horizon = newdata_horizons, site_id = sites_le, forecast_week = 15))
+rcc90_horizonXsite.preds <- predictions(crps.rcc_90, exclude = c("forecast_week"), #type = "response", 
+                                      newdata = expand_grid(horizon = newdata_horizons, site_id = sites_rcc_90, forecast_week = 15))
+gcc90_horizonXsite.preds <- predictions(crps.gcc_90, exclude = c("forecast_week"), #type = "response", 
+                                      newdata = expand_grid(horizon = newdata_horizons, site_id = sites_gcc_90, forecast_week = 15))
+
+comb_preds <- bind_rows(oxy_horizonXsite.preds|>mutate(variable = "oxygen"),
+                        temp_horizonXsite.preds|>mutate(variable = "temperature"),
+                        chla_horizonXsite.preds|>mutate(variable = "chla"),
+                        nee_horizonXsite.preds|>mutate(variable = "nee"),
+                        le_horizonXsite.preds|>mutate(variable = "le"),
+                        gcc90_horizonXsite.preds|>mutate(variable = "gcc_90"),
+                        rcc90_horizonXsite.preds|>mutate(variable = "rcc_90"))
+
+# just visualize this worked
+ggplot(data = comb_preds, aes(x = horizon, y = estimate, color = site_id))+
+  geom_line()+
+  facet_wrap(.~variable, scales = "free_y")
+
+```
+
+
+
 ```{r loops}
 # data setup
 df_gam_nested <- crps_df|>
