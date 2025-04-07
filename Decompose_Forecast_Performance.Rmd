@@ -9,7 +9,7 @@ knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
 library(here)
 library(arrow)
-library(neon4cast)
+#library(neon4cast)
 library(yardstick)
 library(marginaleffects)
 library(mgcv)
@@ -44,54 +44,10 @@ crps_df <- crps_scores_df|>#filter(variable == "oxygen")|>
   summarize(mean_crps_skill = mean(crps_skill, na.rm = TRUE))|>
   mutate(site_id = as_factor(site_id),
          forecast_week_fct = as_factor(forecast_week)) 
+
+ggplot(data = crps_scores_df,aes(crps_skill))+geom_histogram()+scale_x_continuous(limits = c(-2.5,2.5))+facet_wrap(.~variable, scales = "free_y")
 ```
 
-```{r oxygen GAM fit}
-cl <- makeCluster(6)
-tic()
-oxy_beta.1 <- bam(data = crps_oxygen|>filter(site_id %in% c("BLUE", "ARIK"), forecast_week < 14, forecast_week >0),
-                    mean_crps_skill ~ 
-                      site_id+  
-                      s(horizon)+  
-                      s(horizon, by = site_id)+
-                      s(horizon, forecast_week_fct, bs = "sz", by = site_id),
-                      ##s(horizon, forecast_week, bs = "sz"),
-                      ##s(forecast_week, bs= "cc", m = 2)+
-                      ##s(forecast_week, site_id, bs = "fs", xt = list(bs = "tp"))+
-                      ##ti(horizon, forecast_week, by = site_id),
-                    family = betar)
-toc()  #22 minutes - cluster doesn't help
-stopCluster(cl)
-
-oxy_beta.1 <- bam(data = crps_oxygen|>filter(site_id %in% c("BLUE", "ARIK"), forecast_week < 14, forecast_week >0),
-                    mean_crps_skill ~ 
-                      site_id+  
-                      s(horizon)+  
-                      s(horizon, by = site_id)+
-                      s(horizon, forecast_week_fct, bs = "sz", by = site_id),
-                      ##s(horizon, forecast_week, bs = "sz"),
-                      ##s(forecast_week, bs= "cc", m = 2)+
-                      ##s(forecast_week, site_id, bs = "fs", xt = list(bs = "tp"))+
-                      ##ti(horizon, forecast_week, by = site_id),
-                    family = betar)
-
-tic()
-oxy_beta.2 <- bam(data = crps_df|>filter(forecast_week == 35),
-                    mean_crps_skill ~ 
-                      s(horizon, by = variable))#+  # central trend
-                      s(horizon, site_id, bs = "sz", by = variable)+ #deviations from central trend
-                      s(forecast_week, bs = "cc", by = variable)+ #trend for forecast week
-                      ti(horizon, forecast_week, by = variable), #allow effect of horizon to vary based on week
-                    family = gaussian())
-toc()  #3 sec - much shorter without cluster
-
-plot_predictions(oxy_beta.2, condition = c("horizon", "site_id", "forecast_week_fct"), type = "response", points = 0.5)+
-  facet_wrap(.~forecast_week_fct)
-oxy_hoorizonXsite.p <- plot_predictions(crps.oxy.m4, condition = c("horizon", "site_id"), type = "response")
-plotly::ggplotly(oxy_hoorizonXsite.p)
-plot_predictions(oxy_beta.2, #condition = c("horizon", "site_id"), 
-                 by = c("site_id","forecast_week_fct"), type = "response", points = 0.5)
-```
 
 ```{r}
 cl <- makeCluster(6)
@@ -258,6 +214,7 @@ gcc90_horizonXsite.pa
 # Coefficient of variation in slope
 # Coefficient of variation in skill at different horizons
 newdata_horizons <- c(1,5,10,15,20,25,30)
+newdata_weeks <- unique(crps_df$forecast_week)
 sites_oxy <- crps_df|>ungroup()|>filter(variable == "oxygen")|>
                      filter(site_id != "BIGC")|>distinct(site_id)|>pull(site_id)
 sites_temp <- crps_df|>ungroup()|>filter(variable == "temperature")|>
@@ -274,21 +231,13 @@ sites_gcc_90 <- crps_df|>ungroup()|>filter(variable == "gcc_90")|>
                      filter(site_id != "BIGC")|>distinct(site_id)|>pull(site_id)
 
 
-oxy_horizonXsite.preds <- predictions(crps.oxy, exclude = c("forecast_week"), #type = "response", 
-                                      newdata = expand_grid(horizon = newdata_horizons, site_id = sites_oxy, forecast_week = 15))
-#oxy_horizonXsite.preds2 <- avg_predictions(crps.oxy, variables = c("site_id", "horizon"))
-temp_horizonXsite.preds <- predictions(crps.temp, exclude = c("forecast_week"), #type = "response", 
-                                      newdata = expand_grid(horizon = newdata_horizons, site_id = sites_temp, forecast_week = 15))
-chla_horizonXsite.preds <- predictions(crps.chla, exclude = c("forecast_week"), #type = "response", 
-                                      newdata = expand_grid(horizon = newdata_horizons, site_id = sites_chla, forecast_week = 15))
-nee_horizonXsite.preds <- predictions(crps.nee, exclude = c("forecast_week"), #type = "response", 
-                                      newdata = expand_grid(horizon = newdata_horizons, site_id = sites_nee, forecast_week = 15))
-le_horizonXsite.preds <- predictions(crps.le, exclude = c("forecast_week"), #type = "response", 
-                                      newdata = expand_grid(horizon = newdata_horizons, site_id = sites_le, forecast_week = 15))
-rcc90_horizonXsite.preds <- predictions(crps.rcc_90, exclude = c("forecast_week"), #type = "response", 
-                                      newdata = expand_grid(horizon = newdata_horizons, site_id = sites_rcc_90, forecast_week = 15))
-gcc90_horizonXsite.preds <- predictions(crps.gcc_90, exclude = c("forecast_week"), #type = "response", 
-                                      newdata = expand_grid(horizon = newdata_horizons, site_id = sites_gcc_90, forecast_week = 15))
+oxy_horizonXsite.preds <- predictions(crps.oxy, newdata = expand_grid(horizon = newdata_horizons, site_id = sites_oxy, forecast_week = newdata_weeks))
+temp_horizonXsite.preds <- predictions(crps.temp, newdata = expand_grid(horizon = newdata_horizons, site_id = sites_temp, forecast_week = newdata_weeks))
+chla_horizonXsite.preds <- predictions(crps.chla, newdata = expand_grid(horizon = newdata_horizons, site_id = sites_chla, forecast_week = newdata_weeks))
+nee_horizonXsite.preds <- predictions(crps.nee, newdata = expand_grid(horizon = newdata_horizons, site_id = sites_nee, forecast_week = newdata_weeks))
+le_horizonXsite.preds <- predictions(crps.le, newdata = expand_grid(horizon = newdata_horizons, site_id = sites_le, forecast_week = newdata_weeks))
+rcc90_horizonXsite.preds <- predictions(crps.rcc_90,  newdata = expand_grid(horizon = newdata_horizons, site_id = sites_rcc_90, forecast_week = newdata_weeks))
+gcc90_horizonXsite.preds <- predictions(crps.gcc_90, newdata = expand_grid(horizon = newdata_horizons, site_id = sites_gcc_90, forecast_week = newdata_weeks))
 
 comb_preds <- bind_rows(oxy_horizonXsite.preds|>mutate(variable = "oxygen"),
                         temp_horizonXsite.preds|>mutate(variable = "temperature"),
@@ -298,10 +247,57 @@ comb_preds <- bind_rows(oxy_horizonXsite.preds|>mutate(variable = "oxygen"),
                         gcc90_horizonXsite.preds|>mutate(variable = "gcc_90"),
                         rcc90_horizonXsite.preds|>mutate(variable = "rcc_90"))
 
+comb_preds_sh <- comb_preds|>
+  group_by(site_id, horizon, variable)|>
+  summarize(estimate = mean(estimate))
+
+comb_preds_sh|>write_csv(here("GAM_crps_skill_summarized.csv"))
+
 # just visualize this worked
 ggplot(data = comb_preds, aes(x = horizon, y = estimate, color = site_id))+
   geom_line()+
   facet_wrap(.~variable, scales = "free_y")
+
+
+attempt.p <- avg_predictions(crps.oxy) 
+
+```
+
+
+```{r}
+ blah <- comb_preds_sh|>
+  group_by(horizon, variable)|>
+  summarize(mean_est = median(estimate), sd_est = sd(estimate), cv = sd_est/abs(mean_est))|>
+  ungroup()|>
+  mutate(variable = fct_recode(variable, Temperature = "temperature", Oxygen = "oxygen", RCC90 = "rcc_90", GCC90 = "gcc_90", LE = "le", NEE = "nee", `Chlorophyll a` = "chla"))
+levels(blah$variable)
+
+#across-site variation in CRPS-based skill
+ggplot(blah|>
+  mutate(variable = fct_reorder(variable, desc(cv))), aes(x = variable, y = cv))+geom_point()+
+  facet_wrap(.~horizon)+
+  ylab("Coefficient of Variation")+
+  theme(axis.text.x = element_text(angle = 90))
+
+grey_palette <- c("1" = "grey75", "5" = "grey60", "10" = "grey45", "15" = "grey30", "20" = "grey15", "25" = "grey5", "30" = "black")
+
+#across site means of CRPS skill
+ggplot(blah|>
+  mutate(variable = fct_reorder(variable, desc(mean_est))))+
+  geom_point(aes(x = variable, y = mean_est))+
+  #geom_errorbar(aes(x = variable, ymin = mean_est - sd_est, ymax = mean_est + sd_est))+
+  facet_wrap(.~horizon)+
+  ylab("Mean CRPS")+
+  theme(axis.text.x = element_text(angle = 90))
+
+
+ggplot(blah|>mutate(variable = fct_reorder(variable, desc(mean_est))),
+       aes(x = variable, y = mean_est, group = factor(horizon), color = factor(horizon)))+
+  geom_point(position = position_dodge(width = 0.6), size = 3) +
+  scale_color_manual(values = grey_palette)+
+  guides(color = guide_legend(title = "Horizon (days)"))+
+  ylab("CRPS Skill (ML vs Climatological)")+
+  theme_bw()+theme(axis.title.x = element_blank(), axis.title.y = element_text(size = 16), axis.text = element_text(size = 12), axis.text.x = element_text(angle = 45, vjust = 0.6))
 
 ```
 
