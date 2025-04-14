@@ -2,7 +2,7 @@
 library(tidyverse)
 library(here)
 library(arrow)
-library(neon4cast)
+#library(neon4cast)
 library(scoringRules)
 
 source(here("download_target.R"))
@@ -43,7 +43,7 @@ targets <- bind_rows(download_target("aquatics"),
 
 target_clim <- targets |>  
   mutate(doy = yday(datetime)) |> 
-  filter(year(datetime) < 2023)|>
+  filter(year(datetime) < 2023)|> #historic d.o.y.
   group_by(doy, site_id, variable) |> 
   summarise(mean = mean(observation, na.rm = TRUE),
             sd = sd(observation, na.rm = TRUE),
@@ -52,7 +52,7 @@ target_clim <- targets |>
 
 
 targets2 <- targets|>
-  filter(year(datetime) == 2023)|>
+  filter(year(datetime) %in% c(2023,2024))|>
   mutate(doy = yday(datetime))|>
   right_join(target_clim)|>
   filter(!is.na(mean), !is.na(sd))|>
@@ -89,9 +89,9 @@ hist_mean_obs <- tar_hist|>
             iq_range = quantile(observation,0.75, na.rm = TRUE)-quantile(observation, 0.25, na.rm = TRUE))
 
 
-forecasts2 <- forecasts|>
-  left_join(tar_hist)|>
-  left_join(hist_mean_obs)
+#forecasts2 <- forecasts|>
+#  left_join(tar_hist)|>
+#  left_join(hist_mean_obs)
 
 
 forecasts2 <- scores_df_nse|>
