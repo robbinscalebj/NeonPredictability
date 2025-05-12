@@ -112,11 +112,12 @@ df2 <- forecasts2|>rename(reference_datetime = "datetime")|>
   group_by(variable, horizon, site_id, forecast_week)|>
   summarize(mean_hist_obs = mean(mean_historical_observation), #simplifies summarisation - same value being averaged so nothing changed
             N_non_na_obs = sum(!is.na(modobs_diff)),
-            randfor_rmse = sqrt(sum((modobs_diff)^2, na.rm = TRUE)/n()),
-            randfor_rmse2 = sqrt(sum((modobs_diff)^2, na.rm = TRUE)/N_non_na_obs), #test with non-NA
+            raw_error = modobs_diff,
+            rmse = sqrt(sum((modobs_diff)^2, na.rm = TRUE)/n()),
+            rmse_NAexclude = sqrt(sum((modobs_diff)^2, na.rm = TRUE)/N_non_na_obs), #test with non-NA
             #randfor_rmse_normed = randfor_rmse/mean_hist_obs,
-            #randfor_rmse_normed2 = randfor_rmse2/mean_hist_obs,
-            #randfor_rmse_normed3 = randfor_rmse2/iq_range, 
+            #randfor_rmse_normed2 = rmse_NAexclude/mean_hist_obs,
+            #randfor_rmse_normed3 = rmse_NAexclude/iq_range, 
             #persistence_rmse = sqrt(sum((initial_obs)^2, na.rm = TRUE))/n(), #don't know if n(0 correctly counting NAs)
             #persistence_rmse_normed = persistence_rmse/mean_hist_obs,
             #forecast_skill = 1 - (randfor_rmse_normed/persistence_rmse_normed),

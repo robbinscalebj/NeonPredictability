@@ -18,6 +18,8 @@ library(tictoc)
 library(doParallel)
 library(doSNOW)
 source(here("download_target.R"))
+
+site_data <- readr::read_csv("https://raw.githubusercontent.com/eco4cast/neon4cast-targets/main/NEON_Field_Site_Metadata_20220412.csv")
 ```
 
 # Read in forecast metrics
@@ -31,10 +33,15 @@ nnse_scores_df <- read_parquet(here("Data/summarized_weekly_normedNSE.parquet"))
 # Data setup
 
 ```{r}
-nnse_oxygen <- nnse_scores_df|>filter(variable == "oxygen")|>
+nnse_df<- nnse_scores_df|>
   mutate(site_id = as_factor(site_id),
-         forecast_week_fct = as_factor(forecast_week)) #important for 'by' variables in mgcv
+         forecast_week_fct = as_factor(forecast_week))|>
+  filter(N_non_na_obs > 4)
 
+rmse_df <- nnse_df|>
+  group_by(variable, horizon, site_id, forecast_week)|>
+  slice_head(n = 1)
+  
 
 crps_df <- crps_scores_df|>#filter(variable == "oxygen")|>
   group_by(variable)|>
@@ -48,8 +55,9 @@ crps_df <- crps_scores_df|>#filter(variable == "oxygen")|>
 ggplot(data = crps_scores_df,aes(crps_skill))+geom_histogram()+scale_x_continuous(limits = c(-2.5,2.5))+facet_wrap(.~variable, scales = "free_y")
 ```
 
+# CRPS analysis
 
-```{r}
+```{r crps models}
 cl <- makeCluster(6)
 tic()
 crps.temp <- bam(data = crps_df|>
@@ -214,30 +222,30 @@ gcc90_horizonXsite.pa
 # Coefficient of variation in slope
 # Coefficient of variation in skill at different horizons
 newdata_horizons <- c(1,5,10,15,20,25,30)
-newdata_weeks <- unique(crps_df$forecast_week)
 sites_oxy <- crps_df|>ungroup()|>filter(variable == "oxygen")|>
-                     filter(site_id != "BIGC")|>distinct(site_id)|>pull(site_id)
+                     filter(site_id != "BIGC")|>distinct(site_id, forecast_week)
 sites_temp <- crps_df|>ungroup()|>filter(variable == "temperature")|>
-                     filter(site_id != "BIGC")|>distinct(site_id)|>pull(site_id)
+                     filter(site_id != "BIGC")|>distinct(site_id, forecast_week)
 sites_chla <- crps_df|>ungroup()|>filter(variable == "chla")|>
-                     filter(site_id != "BIGC")|>distinct(site_id)|>pull(site_id)
+                     filter(site_id != "BIGC")|>distinct(site_id, forecast_week)
 sites_nee <- crps_df|>ungroup()|>filter(variable == "nee")|>
-                     filter(site_id != "BIGC")|>distinct(site_id)|>pull(site_id)
+                     filter(site_id != "BIGC")|>distinct(site_id, forecast_week)
 sites_le <- crps_df|>ungroup()|>filter(variable == "le")|>
-                     filter(site_id != "BIGC")|>distinct(site_id)|>pull(site_id)
+                     filter(site_id != "BIGC")|>distinct(site_id, forecast_week)
 sites_rcc_90 <- crps_df|>ungroup()|>filter(variable == "rcc_90")|>
-                     filter(site_id != "BIGC")|>distinct(site_id)|>pull(site_id)
+                     filter(site_id != "BIGC")|>distinct(site_id, forecast_week)
 sites_gcc_90 <- crps_df|>ungroup()|>filter(variable == "gcc_90")|>
-                     filter(site_id != "BIGC")|>distinct(site_id)|>pull(site_id)
+                     filter(site_id != "BIGC")|>distinct(site_id, forecast_week)
 
 
-oxy_horizonXsite.preds <- predictions(crps.oxy, newdata = expand_grid(horizon = newdata_horizons, site_id = sites_oxy, forecast_week = newdata_weeks))
-temp_horizonXsite.preds <- predictions(crps.temp, newdata = expand_grid(horizon = newdata_horizons, site_id = sites_temp, forecast_week = newdata_weeks))
-chla_horizonXsite.preds <- predictions(crps.chla, newdata = expand_grid(horizon = newdata_horizons, site_id = sites_chla, forecast_week = newdata_weeks))
-nee_horizonXsite.preds <- predictions(crps.nee, newdata = expand_grid(horizon = newdata_horizons, site_id = sites_nee, forecast_week = newdata_weeks))
-le_horizonXsite.preds <- predictions(crps.le, newdata = expand_grid(horizon = newdata_horizons, site_id = sites_le, forecast_week = newdata_weeks))
-rcc90_horizonXsite.preds <- predictions(crps.rcc_90,  newdata = expand_grid(horizon = newdata_horizons, site_id = sites_rcc_90, forecast_week = newdata_weeks))
-gcc90_horizonXsite.preds <- predictions(crps.gcc_90, newdata = expand_grid(horizon = newdata_horizons, site_id = sites_gcc_90, forecast_week = newdata_weeks))
+
+oxy_horizonXsite.preds <- predictions(crps.oxy, newdata = expand_grid(horizon = newdata_horizons, sites_oxy))
+temp_horizonXsite.preds <- predictions(crps.temp, newdata = expand_grid(horizon = newdata_horizons, sites_temp))
+chla_horizonXsite.preds <- predictions(crps.chla, newdata = expand_grid(horizon = newdata_horizons, sites_chla))
+nee_horizonXsite.preds <- predictions(crps.nee, newdata = expand_grid(horizon = newdata_horizons, sites_nee))
+le_horizonXsite.preds <- predictions(crps.le, newdata = expand_grid(horizon = newdata_horizons, sites_le))
+rcc90_horizonXsite.preds <- predictions(crps.rcc_90,  newdata = expand_grid(horizon = newdata_horizons, sites_rcc_90))
+gcc90_horizonXsite.preds <- predictions(crps.gcc_90, newdata = expand_grid(horizon = newdata_horizons,sites_gcc_90))
 
 comb_preds <- bind_rows(oxy_horizonXsite.preds|>mutate(variable = "oxygen"),
                         temp_horizonXsite.preds|>mutate(variable = "temperature"),
@@ -259,15 +267,48 @@ ggplot(data = comb_preds, aes(x = horizon, y = estimate, color = site_id))+
   facet_wrap(.~variable, scales = "free_y")
 
 
-attempt.p <- avg_predictions(crps.oxy) 
+
 
 ```
 
+```{r predict forecast week}
+week_errors <- comb_preds|>
+  filter(horizon == 5)|>
+  group_by(site_id, forecast_week, variable)|>
+  summarize(mean_est = median(estimate, na.rm = TRUE), sd_est = sd(estimate, na.rm = TRUE), cv = sd_est/abs(mean_est))|>
+  ungroup()|>
+  mutate(variable = fct_recode(variable, Temperature = "temperature", Oxygen = "oxygen", RCC90 = "rcc_90", GCC90 = "gcc_90", LE = "le", NEE = "nee", `Chlorophyll a` = "chla"))
 
+var_errors <- comb_preds|>
+  filter(horizon == 5)|>
+  group_by(site_id, variable)|>
+  summarize(mean_est = median(estimate, na.rm = TRUE))|>
+  pivot_wider(names_from = "variable", values_from = "mean_est")|>ungroup()|>select(-site_id)
+  
+
+GGally::ggpairs(var_errors)
+
+
+ggplot(week_errors, aes(x = forecast_week, y = mean_est))+
+  geom_line(aes(group = site_id))+
+  geom_smooth()+
+  facet_wrap(.~variable, scales = "free_y")+
+  theme_classic()
+
+ggplot(week_errors|>filter(variable == "Oxygen"), aes(x = forecast_week, y = mean_est))+
+  geom_line(aes(group = site_id))+
+  geom_smooth()+
+  facet_wrap(.~variable, scales = "free_y")+
+  theme_classic()+
+  scale_y_continuous(limits = c(-2,2))
+
+```
+
+Is the skill (crps - climatology) just really dependent on the particular year? 
 ```{r}
  blah <- comb_preds_sh|>
   group_by(horizon, variable)|>
-  summarize(mean_est = median(estimate), sd_est = sd(estimate), cv = sd_est/abs(mean_est))|>
+  summarize(mean_est = median(estimate, na.rm = TRUE), sd_est = sd(estimate, na.rm = TRUE), cv = sd_est/abs(mean_est))|>
   ungroup()|>
   mutate(variable = fct_recode(variable, Temperature = "temperature", Oxygen = "oxygen", RCC90 = "rcc_90", GCC90 = "gcc_90", LE = "le", NEE = "nee", `Chlorophyll a` = "chla"))
 levels(blah$variable)
@@ -302,7 +343,250 @@ ggplot(blah|>mutate(variable = fct_reorder(variable, desc(mean_est))),
 ```
 
 
+# RMSE analysis
 
+```{r crps models}
+cl <- makeCluster(6)
+tic()
+rmse.temp <- bam(data = rmse_df|>
+                     filter(variable == "temperature")|>
+                     filter(horizon <=30),
+                    rmse ~ 
+                      s(horizon)+  # central trend
+                      s(horizon, site_id, bs = "sz")+ #site-level deviations from central trend
+                      s(forecast_week, bs = "cc")+ #trend for forecast week
+                      ti(horizon, forecast_week)+ #allow effect of horizon to vary based on week
+                      s(forecast_week, site_id, bs = "fs", xt= list(bs = "cc")), #site-level deviation for forecast week effect
+                    family = Gamma(link = "log"), cluster = cl)
+stopCluster(cl)
+toc()# 9.2 hours
+
+#saveRDS(rmse.temp, here("rmse_temp_gam.Rds"))
+
+cl <- makeCluster(6)
+tic()
+rmse.oxy <- bam(data = rmse_df|>
+                     filter(variable == "oxygen")|>
+                     filter(horizon <=30),
+                    rmse ~ 
+                      s(horizon)+  # central trend
+                      s(horizon, site_id, bs = "sz")+ #site-level deviations from central trend
+                      s(forecast_week, bs = "cc")+ #trend for forecast week
+                      ti(horizon, forecast_week)+ #allow effect of horizon to vary based on week
+                      s(forecast_week, site_id, bs = "fs", xt= list(bs = "cc")), #site-level deviation for forecast week effect
+                    family = Gamma(link = "log"), cluster = cl)
+stopCluster(cl)
+toc() #0.5 h
+
+cl <- makeCluster(6)
+tic()
+rmse.chla <- bam(data = rmse_df|>
+                     filter(variable == "chla")|>
+                     filter(horizon <=30),
+                    rmse ~ 
+                      s(horizon)+  # central trend
+                      s(horizon, site_id, bs = "sz")+ #site-level deviations from central trend
+                      s(forecast_week, bs = "cc")+ #trend for forecast week
+                      ti(horizon, forecast_week)+ #allow effect of horizon to vary based on week
+                      s(forecast_week, site_id, bs = "fs", xt= list(bs = "cc")), #site-level deviation for forecast week effect
+                    family = Gamma(link = "log"), cluster = cl)
+stopCluster(cl)
+toc() # 1 minute
+
+cl <- makeCluster(6)
+tic()
+rmse.le<- bam(data = rmse_df|>
+                     filter(variable == "le")|>
+                     filter(horizon <=30),
+                    rmse ~ 
+                      s(horizon)+  # central trend
+                      s(horizon, site_id, bs = "sz")+ #site-level deviations from central trend
+                      s(forecast_week, bs = "cc")+ #trend for forecast week
+                      ti(horizon, forecast_week)+ #allow effect of horizon to vary based on week
+                      s(forecast_week, site_id, bs = "fs", xt= list(bs = "cc")), #site-level deviation for forecast week effect
+                    family = Gamma(link = "log"), cluster = cl)
+stopCluster(cl)
+toc() # 50 min
+
+cl <- makeCluster(6)
+tic()
+rmse.le2<- bam(data = rmse_df|>
+                     filter(variable == "le")|>
+                     filter(horizon <=30),
+                    rmse ~ 
+                      s(horizon)+  # central trend
+                      site_id +   
+                      s(horizon, site_id, bs = "sz")+ #site-level deviations from central trend
+                      s(forecast_week, bs = "cc")+ #trend for forecast week
+                      ti(horizon, forecast_week)+ #allow effect of horizon to vary based on week
+                      s(forecast_week, site_id, bs = "fs", xt= list(bs = "cc")), #site-level deviation for forecast week effect
+                    family = Gamma(link = "log"), cluster = cl)
+stopCluster(cl)
+toc() 
+
+cl <- makeCluster(6)
+tic()
+rmse.nee <- bam(data = rmse_df|>
+                     filter(variable == "nee")|>
+                     filter(horizon <=30),
+                    rmse ~ 
+                      s(horizon)+  # central trend
+                      s(horizon, site_id, bs = "sz")+ #site-level deviations from central trend
+                      s(forecast_week, bs = "cc")+ #trend for forecast week
+                      ti(horizon, forecast_week)+ #allow effect of horizon to vary based on week
+                      s(forecast_week, site_id, bs = "fs", xt= list(bs = "cc")), #site-level deviation for forecast week effect
+                    family = Gamma(link = "log"), cluster = cl)
+stopCluster(cl)
+toc() #~1.5 h
+
+cl <- makeCluster(6)
+tic()
+rmse.gcc_90 <- bam(data = rmse_df|>
+                     filter(variable == "gcc_90")|>
+                     filter(horizon <=30),
+                    rmse ~ 
+                      s(horizon)+  # central trend
+                      s(horizon, site_id, bs = "sz")+ #site-level deviations from central trend
+                      s(forecast_week, bs = "cc")+ #trend for forecast week
+                      ti(horizon, forecast_week)+ #allow effect of horizon to vary based on week
+                      s(forecast_week, site_id, bs = "fs", xt= list(bs = "cc")), #site-level deviation for forecast week effect
+                    family = Gamma(link = "log"), cluster = cl)
+stopCluster(cl)
+toc() #~40 min
+
+cl <- makeCluster(6)
+tic()
+rmse.rcc_90 <- bam(data = rmse_df|>
+                     filter(variable == "rcc_90")|>
+                     filter(horizon <=30),
+                    rmse ~ 
+                      s(horizon)+  # central trend
+                      s(horizon, site_id, bs = "sz")+ #site-level deviations from central trend
+                      s(forecast_week, bs = "cc")+ #trend for forecast week
+                      ti(horizon, forecast_week)+ #allow effect of horizon to vary based on week
+                      s(forecast_week, site_id, bs = "fs", xt= list(bs = "cc")), #site-level deviation for forecast week effect
+                    family = Gamma(link = "log"), cluster = cl)
+stopCluster(cl)
+toc() # 62 minutes
+
+```
+
+```{r model checks}
+appraise(rmse.oxy)
+appraise(rmse.temp)
+appraise(rmse.chla)
+appraise(rmse.nee)
+appraise(rmse.le)
+appraise(rmse.gcc_90)
+appraise(rmse.rcc_90)
+
+```
+
+
+
+
+```{r plot predictions site by horizon}
+
+roxy_horizonXsite.pa <- plot_predictions(rmse.oxy, condition = c("horizon", "site_id"), type = "response")+
+  horsite_theme
+rtemp_horizonXsite.pa <- plot_predictions(rmse.temp, condition = c("horizon", "site_id"), type = "response")+
+  horsite_theme
+rchla_horizonXsite.pa <- plot_predictions(rmse.chla, condition = c("horizon", "site_id"), type = "response")+
+  horsite_theme
+rnee_horizonXsite.pa <- plot_predictions(rmse.nee, condition = c("horizon", "site_id"), type = "response")+
+  horsite_theme
+rle_horizonXsite.pa <- plot_predictions(rmse.le, condition = c("horizon", "site_id"), type = "response")+
+  horsite_theme
+rrcc90_horizonXsite.pa <- plot_predictions(rmse.rcc_90, condition = c("horizon", "site_id"), type = "response")+
+  horsite_theme
+rgcc90_horizonXsite.pa <- plot_predictions(rmse.gcc_90, condition = c("horizon", "site_id"), type = "response")+
+  horsite_theme
+
+#plotly::ggplotly(oxy_horizonXsite.pa)
+
+roxy_horizonXsite.pa
+rtemp_horizonXsite.pa
+rchla_horizonXsite.pa
+rnee_horizonXsite.pa
+rle_horizonXsite.pa
+rrcc90_horizonXsite.pa
+rgcc90_horizonXsite.pa
+
+```
+
+```{r}
+# Coefficient of variation in slope
+# Coefficient of variation in skill at different horizons
+
+roxy_horizonXsite.preds <- predictions(rmse.oxy, newdata = expand_grid(horizon = newdata_horizons, sites_oxy))
+rtemp_horizonXsite.preds <- predictions(rmse.temp, newdata = expand_grid(horizon = newdata_horizons, sites_temp))
+rchla_horizonXsite.preds <- predictions(rmse.chla, newdata = expand_grid(horizon = newdata_horizons, sites_chla))
+rnee_horizonXsite.preds <- predictions(rmse.nee, newdata = expand_grid(horizon = newdata_horizons, sites_nee))
+rle_horizonXsite.preds <- predictions(rmse.le, newdata = expand_grid(horizon = newdata_horizons, sites_le))
+rrcc90_horizonXsite.preds <- predictions(rmse.rcc_90,  newdata = expand_grid(horizon = newdata_horizons, sites_rcc_90))
+rgcc90_horizonXsite.preds <- predictions(rmse.gcc_90, newdata = expand_grid(horizon = newdata_horizons,sites_gcc_90))
+
+comb_rpreds <- bind_rows(roxy_horizonXsite.preds|>mutate(variable = "oxygen"),
+                        rtemp_horizonXsite.preds|>mutate(variable = "temperature"),
+                        rchla_horizonXsite.preds|>mutate(variable = "chla"),
+                        rnee_horizonXsite.preds|>mutate(variable = "nee"),
+                        rle_horizonXsite.preds|>mutate(variable = "le"),
+                        rgcc90_horizonXsite.preds|>mutate(variable = "gcc_90"),
+                        rrcc90_horizonXsite.preds|>mutate(variable = "rcc_90"))
+
+comb_rpreds_sh <- comb_rpreds|>
+  group_by(site_id, horizon, variable)|>
+  summarize(estimate = mean(estimate))
+
+comb_preds_sh|>write_csv(here("GAM_rmse_summarized.csv"))
+
+# just visualize this worked
+ggplot(data = comb_rpreds, aes(x = horizon, y = estimate, color = site_id))+
+  geom_line()+
+  facet_wrap(.~variable, scales = "free_y")
+
+
+
+
+```
+
+```{r predict forecast week}
+week_rerrors <- comb_rpreds|>
+  filter(horizon == 5)|>
+  group_by(site_id, forecast_week, variable)|>
+  summarize(mean_est = median(estimate, na.rm = TRUE), sd_est = sd(estimate, na.rm = TRUE), cv = sd_est/abs(mean_est))|>
+  ungroup()|>
+  mutate(variable = fct_recode(variable, Temperature = "temperature", Oxygen = "oxygen", RCC90 = "rcc_90", GCC90 = "gcc_90", LE = "le", NEE = "nee", `Chlorophyll a` = "chla"))
+
+var_rerrors <- comb_rpreds|>
+  filter(horizon == 5)|>
+  group_by(site_id, variable)|>
+  summarize(mean_est = median(estimate, na.rm = TRUE))|>
+  pivot_wider(names_from = "variable", values_from = "mean_est")|>ungroup()|>select(-site_id)
+  
+
+GGally::ggpairs(var_rerrors)
+
+
+ggplot(week_rerrors, aes(x = forecast_week, y = mean_est))+
+  geom_line(aes(group = site_id))+
+  geom_smooth()+
+  facet_wrap(.~variable, scales = "free_y")+
+  theme_classic()
+
+ggplot(week_rerrors|>filter(variable == "Oxygen"), aes(x = forecast_week, y = mean_est))+
+  geom_line(aes(group = site_id))+
+  geom_smooth()+
+  facet_wrap(.~variable, scales = "free_y")+
+  theme_classic()+
+  scale_y_continuous(limits = c(-2,2))
+
+```
+
+
+
+
+# Old
 ```{r loops}
 # data setup
 df_gam_nested <- crps_df|>

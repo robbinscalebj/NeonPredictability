@@ -10,7 +10,7 @@ s3_pheno <- arrow::s3_bucket(bucket = "neon4cast-scores/parquet/phenology", endp
 s3_terr <- arrow::s3_bucket(bucket = "neon4cast-scores/parquet/terrestrial_daily", endpoint_override= "data.ecoforecast.org")
 
 start_ref_date <- as_date('2023-01-01') # what period do you want the scores for?
-end_ref_date <- as_date('2024-12-31')
+end_ref_date <- as_date('2023-12-31')
 get_refdates <- as.character(seq(start_ref_date, end_ref_date, by = 'day'))
 
 get_sites <- readr::read_csv("https://raw.githubusercontent.com/eco4cast/neon4cast-targets/main/NEON_Field_Site_Metadata_20220412.csv", show_col_types = F) |> 
